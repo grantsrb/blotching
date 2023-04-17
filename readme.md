@@ -1,4 +1,4 @@
-# Leveraging LLMs for Context Compression
+# Semantic Blotching
 
 ## Using this repo
 After cloning, you will first need to initialize the `ml_utils`
@@ -28,14 +28,6 @@ then running the following command:
         folder for the hyperparameter search.
     "data_root": str
         the path to where the processed datasets are saved
-    "data_cache": str
-        path to where to cache the downloaded datasets
-    "model_string": str
-        the pretrained huggingface model you would like to use. For
-        example: "bigscience/bloomz-560m"
-    "testing": str
-        a model string to use for testing. you will probably just want
-        to use "hf-internal-testing/tiny-random-gptj"
     "multi_gpu": bool
         if true, the script will try a data parallel approach, splitting
         the batches accross multiple gpus
