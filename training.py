@@ -4,14 +4,13 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 
 import numpy as np
 import time
-from transformers import AutoTokenizer
 from tqdm import tqdm
 import os
 
-from ml_utils.utils import try_key
 import ml_utils
 import datas
 from models import *
+from envs import ProbGen
 
 RMB = "|<RMB>|" # Extra characters are to ensure uniqueness
 CMP = "|<CMP{}>|"
@@ -21,66 +20,69 @@ SOS = "|<SOS>|"
 def train(rank, hyps, verbose=True, *args, **kwargs):
     # Distributed Set Up
     torch.cuda.empty_cache()
-    hyps["multi_gpu"] = try_key(hyps, "multi_gpu", False)
+    hyps["multi_gpu"] = hyps.get("multi_gpu", False)
     if hyps["multi_gpu"]:
-        world_size = try_key(hyps, "n_gpus", 1)
+        world_size = hyps.get("n_gpus", 1)
         dist.init_process_group("gloo", rank=rank, world_size=world_size)
-    assert not hyps.get("csl_task",False) or\
-        (hyps.get("train_lmhead",False) or hyps.get("train_embs", False))
 
     # Hyperparameters
-    if hyps["exp_name"]=="test" and hyps["test_model_str"] is not None:
-        hyps["model_string"] = hyps["test_model_str"]
     model_string = hyps["model_string"]
     lr = hyps["lr"]
     l2 = hyps["l2"]
     n_epochs = hyps["n_epochs"]
-    hyps["seed"] = try_key(hyps, "seed", int(time.time()))
+    hyps["seed"] = hyps.get("seed", int(time.time()))
     if hyps["seed"] is None: hyps["seed"] = int(time.time())
-    torch.manual_seed(hyps["seed"]*rank)
+    torch.manual_seed(hyps["seed"]+rank)
     hyps["rank"] = rank
 
-    hyps["device_map"] = "auto" if hyps["model_parallel"] else None
-    model = SentenceAutoEncoder(**hyps)
-    if not hyps["model_parallel"]: model.to(rank)
+    # Establish math environment parameters
+    math_env = ProbGen(**hyps)
 
     # Make Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_string)
-    tokenizer.truncation_side = "right"
+    max_num = hyps.get("max_num", 20)**hyps.get("max_ents", 2)
+    tokenizer = datas.get_tokenizer(
+        digit_embs=hyps.get("digit_embs",True),
+        max_num=max_num
+    )
+    hyps["n_tokens"] = tokenizer.n_tokens
+    hyps["str2idx"] = tokenizer.str2idx
 
-    # Add important tokens
-    num_added = 0
-    if tokenizer.pad_token is None:
-        print("No Pad Token")
-        print("EOS:", tokenizer.eos_token)
-        print("BOS:", tokenizer.bos_token)
-        print("CLS:", tokenizer.cls_token)
-        if tokenizer.eos_token is not None:
-            tokenizer.add_special_tokens(
-                {"pad_token": tokenizer.eos_token}
-            )
-        else:
-            num_added += tokenizer.add_special_tokens(
-                {"pad_token": "|<PAD>|"}
-            )
-        #num_added += tokenizer.add_special_tokens({
-        #    "pad_token": "|<PAD>|",
-        #    "eos_token": "|<EOS>|",
-        #})
-        print("PAD:", tokenizer.pad_token)
-    hyps["pad_token"] = tokenizer.pad_token
-
-    # Adjust Model Embeddings for new token types
-    model.add_embeddings(num_added)
-
+    model = globals()[model_string](**hyps)
+    hyps["model_parallel"] = hyps.get("model_parallel", False)
+    if not hyps["model_parallel"]: model.to(rank)
 
     # Make dataset
     if verbose and rank==0:
-        print("Collecting Data")
-    dataset, valset, dataloader, valloader = datas.get_loaders(
-        hyps,
+        print("Collecting Initial Data")
+    if hyps["exp_name"]=="test": hyps["max_samples"] = 1000
+    hyps["init_samples"] = hyps.get(
+        "init_samples", hyps.get("max_samples",1000000)
+    )
+    data = datas.sample_data(
+        math_env,
         tokenizer,
-        model=model
+        n_samples=hyps["init_samples"],
+        max_len=hyps["seq_len"]
+    )
+    data_cache = datas.DataCache(
+        max_samples=hyps["max_samples"],
+        seq_len=hyps["seq_len"],
+        batch_size=hyps["batch_size"],
+        init_data=data
+    )
+    if verbose and rank==0:
+        print("Collecting Validation Data")
+    data = datas.sample_data(
+        math_env,
+        tokenizer,
+        n_samples=hyps["init_samples"],
+        max_len=hyps["seq_len"]
+    )
+    val_cache = datas.DataCache(
+        max_samples=hyps.get("val_samples", 100000),
+        seq_len=hyps["seq_len"],
+        batch_size=hyps["val_batch_size"],
+        init_data=data
     )
 
     if verbose and rank==0:
@@ -96,35 +98,15 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             print("Putting Model On GPU")
         wrapped_model.to(rank)
 
-    # Turn off gradient calculations for everything except for the
-    # embedding matrix.
-    embs = model.embs
-    if verbose and rank==0:
-        print("Turning Off Gradients")
-    params = set(embs.parameters())
-    if try_key(hyps,"train_embs",False):
-        mod = model.hf_model.transformer.get_input_embeddings()
-        params = params.union(mod.parameters())
-    if try_key(hyps,"train_lmhead",False):
-        mod = model.hf_model.lm_head
-        params = params.union(mod.parameters())
-    if hyps.get("proj_cmpr", False):
-        params = params.union(model.proj_cmpr.parameters())
-    for name, p in model.named_parameters():
-        if p not in params:
-            p.requires_grad = False
-        elif rank==0 and verbose:
-            print(name, "gradients on")
-
     if verbose and rank==0:
         print("Creating Optimizer")
     optimizer = torch.optim.Adam(
-        params,
+        model.parameters(),
         lr=lr,
         weight_decay=l2
     )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, threshold=0.001, patience=try_key(hyps,"patience",10)
+        optimizer, threshold=0.001, patience=hyps.get("patience",10)
     )
 
     if hyps["multi_gpu"]:
@@ -152,53 +134,33 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         ddp_model.train()
         avg_loss = 0
         avg_acc = 0
-        rmb_avg_loss = 0
-        rmb_avg_acc = 0
-        csl_avg_loss = 0
-        csl_avg_acc = 0
-        nloops = try_key(hyps,"n_train_loops", None)
-        nloops = len(dataloader) if nloops is None else nloops
-        nloops = min(nloops,len(dataloader))
-        checkpt_mod = try_key(hyps, "checkpt_mod", None)
+        nloops = hyps.get("n_train_loops", None)
+        nloops = len(data_cache) if nloops is None else nloops
+        nloops = min(nloops,len(data_cache))
+        checkpt_mod = hyps.get( "checkpt_mod", None)
         checkpt_mod = np.inf if checkpt_mod is None else checkpt_mod
-        val_mod = try_key(hyps, "val_mod", 1)
+        val_mod = hyps.get( "val_mod", 1)
         optimizer.zero_grad()
-        for i,data in enumerate(dataloader):
+        for i,data in enumerate(data_cache):
             starttime = time.time()
             if not hyps["model_parallel"]:
                 data = {k: v.to(rank) for k,v in data.items()}
-            #if hyps["dtype"]!="float32":
-            #  data = {
-            #    k: v.to(getattr(torch,hyps["dtype"])) for\
-            #                           k,v in data.items()
-            #  }
-
             package = ddp_model(
                 data,
                 ret_preds=True,
                 seq_len=hyps["seq_len"],
                 tforce=True,
-                gen_ids=try_key(hyps, "gen_ids", False)
+                gen_ids=hyps.get( "gen_ids", False)
             )
             loss = package["loss"]
             acc = package["acc"]
 
             avg_acc += acc.item()
             avg_loss += loss.item()
-            if "rmb_loss" in package:
-                rmb_avg_loss += package["rmb_loss"].item()
-                rmb_avg_acc  += package["rmb_acc"].item()
-            if "csl_loss" in package:
-                csl_avg_loss += package["csl_loss"].item()
-                csl_avg_acc  += package["csl_acc"].item()
 
-            if i%hyps["n_grad_loops"]==0 or i==len(dataloader)-1:
-                if try_key(hyps,"grad_scaling",False):
+            if i%hyps["n_grad_loops"]==0 or i==len(data_cache)-1:
+                if hyps.get("grad_scaling",False):
                     model.embs.weight.grad.data = temp/temp.norm(2)
-                #temp = model.embs.weight.grad.data
-                #print("abs grad mean:",  temp.abs().mean(-1))
-                #print("grad norm:",      temp.norm(2))
-                #print()
                 if hyps.get("grad_clip",0) > 0:
                     torch.nn.utils.clip_grad_norm_(
                         ddp_model.parameters(), hyps["grad_clip"]
@@ -213,45 +175,12 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 c = round(100*i/nloops, 2)
                 t = round(time.time()-starttime, 3)
                 s = "Loss: {} -Acc: {}".format(l,a)
-                if "rmb_loss" in package:
-                    l = round(package["rmb_loss"].item(), dec)
-                    a = round(package["rmb_acc"].item(), dec)
-                    s += " -RMB: {} -RMBAc: {}".format(l,a)
-                if "csl_loss" in package:
-                    l = round(package["csl_loss"].item(), dec)
-                    a = round(package["csl_acc"].item(), dec)
-                    s += " -CSL: {} -CSLAc: {}".format(l,a)
                 s += " - {}% {}s   ".format(c,t)
-                #s = "Loss: {} -- Acc: {} -- {}% -- {}s".format(l,a,c,t)
                 print(s, end=int(len(s)/2)*" " + "\r")
             if hyps["exp_name"]=="test" and i>=30: break
             if i>=(nloops-1): break
-            if i>0 and i%checkpt_mod==0 and rank==0:
-                if try_key(hyps, "save", True):
-                    if verbose:
-                        print()
-                        s = "Checkpt Training Predictions"
-                        print(s)
-                        low_preds, high_preds = get_baselines(
-                            model,data,hyps,
-                            rank=rank,tforce=True,to_cpu=True,
-                            calc_high="csl_preds" not in package
-                        )
-                        high_preds=package.get("csl_preds",high_preds)
-                        inpt_dict = {
-                            "input_ids":  data["input_ids"],
-                            "output_ids": data["output_ids"],
-                            **package,
-                            "low": low_preds, "high": high_preds
-                        }
-                        examples, s = print_examples(
-                            inpt_dict,
-                            tokenizer
-                        )
-                        keys = list(inpt_dict.keys())
-                        for k in keys:
-                            inpt_dict[k] = inpt_dict[k].cpu()
-                        del inpt_dict
+            if i>0 and checkpt_mod and i%checkpt_mod==0 and rank==0:
+                if hyps.get( "save", True):
                     train_loss = round(avg_loss/i, 5)
                     train_acc = round(avg_acc/i, 5)
                     save_dict = {
@@ -266,7 +195,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                         "hyps": hyps,
                         "examples": examples,
                     }
-                    ep = round(epoch+i/len(dataloader), 3)
+                    ep = round(epoch+i/len(data_cache), 3)
                     ml_utils.save_io.save_checkpt(
                         save_dict=save_dict,
                         save_folder=hyps["save_folder"],
@@ -277,27 +206,15 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         div = (i+1)
         train_loss = round(avg_loss/div, 5)
         train_acc  = round(avg_acc/div, 5)
-        if "rmb_loss" in package:
-            rmb_train_loss = round(rmb_avg_loss/div, 5)
-            rmb_train_acc = round(rmb_avg_acc/div, 5)
-        if "csl_loss" in package:
-            csl_train_loss = round(csl_avg_loss/div, 5)
-            csl_train_acc = round(csl_avg_acc/div, 5)
         if rank==0 and verbose:
             print()
             s = "Example Predictions On Training"
             print(s)
             logstr += s + "\n"
-            low_preds, high_preds = get_baselines(
-                model,data,hyps, rank=rank,tforce=True,to_cpu=True,
-                calc_high="csl_preds" not in package
-            )
-            high_preds=package.get("csl_preds",high_preds)
             inpt_dict = {
                 "input_ids":  data["input_ids"],
                 "output_ids": data["output_ids"],
-                **package,
-                "low": low_preds, "high": high_preds
+                **package
             }
             examples,s = print_examples( inpt_dict, tokenizer )
             logstr += s + "\n"
@@ -310,161 +227,103 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         # Validation
         avg_loss = 0
         avg_acc = 0
-        rmb_avg_loss = 0
-        rmb_avg_acc = 0
-        csl_avg_loss = 0
-        csl_avg_acc = 0
-        if rank==0 and epoch%val_mod==0:
-            ddp_model.eval()
-            if verbose:
-                print("Validating...")
-            with torch.no_grad():
-                nloops = try_key(hyps,"max_val_loops",None)
-                if nloops is None: nloops = len(valloader)
-                for i,data in enumerate(valloader):
-                    starttime = time.time()
-                    if not hyps["model_parallel"]:
-                        data = {k: v.to(rank) for k,v in data.items()}
-                    #if hyps["dtype"]!="float32":
-                    #  data = {
-                    #    k: v.to(getattr(torch,hyps["dtype"])) for\
-                    #                          k,v in data.items()
-                    #  }
-                    package = ddp_model(
-                        data,
-                        ret_preds=True,
-                        tforce=False,
-                        gen_targs=try_key(hyps, "gen_targs", False),
-                        seq_len=hyps["seq_len"],
-                        gen_ids=try_key(hyps, "gen_ids", False)
-                    )
-                    loss = package["loss"]
-                    acc = package["acc"]
-                    preds = package["preds"]
-                    if "rmb_loss" in package:
-                        rmb_avg_loss += package["rmb_loss"].item()
-                        rmb_avg_acc  += package["rmb_acc"].item()
-                    if "csl_loss" in package:
-                        csl_avg_loss += package["csl_loss"].item()
-                        csl_avg_acc  += package["csl_acc"].item()
+        #if rank==0 and epoch%val_mod==0:
+        #    ddp_model.eval()
+        #    if verbose:
+        #        print("Validating...")
+        #    with torch.no_grad():
+        #        nloops = hyps.get("max_val_loops",None)
+        #        if nloops is None: nloops = len(val_cache)
+        #        for i,data in enumerate(val_cache):
+        #            starttime = time.time()
+        #            if not hyps["model_parallel"]:
+        #                data = {k: v.to(rank) for k,v in data.items()}
+        #            package = ddp_model(
+        #                data,
+        #                ret_preds=True,
+        #                tforce=False,
+        #                gen_targs=hyps.get( "gen_targs", False),
+        #                seq_len=hyps["seq_len"],
+        #                gen_ids=hyps.get( "gen_ids", False)
+        #            )
+        #            loss = package["loss"]
+        #            acc = package["acc"]
+        #            preds = package["preds"]
 
-                    avg_loss += loss.item()
-                    avg_acc += acc.item()
-                    if hyps["exp_name"]=="test" and i>=3: break
-                    if i>=nloops-l: break
-                    if verbose and i%20==0:
-                        p = round(100*i/nloops)
-                        t = time.time()-starttime
-                        print("{}% -- {}s".format(p,t), end="     \r")
-            div = (i+1)
-            val_loss = round(avg_loss/div, 5)
-            val_acc = round(avg_acc/div, 5)
-            if "rmb_loss" in package:
-                rmb_val_loss = round(rmb_avg_loss/div, 5)
-                rmb_val_acc = round(rmb_avg_acc/div, 5)
-            if "csl_loss" in package:
-                csl_val_loss = round(csl_avg_loss/div, 5)
-                csl_val_acc = round(csl_avg_acc/div, 5)
-            if rank==0 and verbose:
-                print()
-                s = "Example Predictions On Validation"
-                print(s)
-                logstr += s + "\n"
-                low_preds, high_preds = get_baselines(
-                    model,data,hyps,rank=rank,tforce=False,to_cpu=True,
-                    calc_high="csl_preds" not in package
-                )
-                high_preds=package.get("csl_preds",high_preds)
-                inpt_dict = {
-                    "input_ids": data["input_ids"],
-                    "output_ids": data["output_ids"],
-                    **package,
-                    "low": low_preds, "high": high_preds
-                }
-                examples,s = print_examples( inpt_dict, tokenizer )
-                keys = list(inpt_dict.keys())
-                for k in keys:
-                    inpt_dict[k] = inpt_dict[k].cpu()
-                del inpt_dict
-                logstr += s + "\n"
-                print()
-                s = "Final Stats, Epoch: {}".format(epoch)
-                print(s)
-                logstr += "\n" + s + "\n"
+        #            avg_loss += loss.item()
+        #            avg_acc += acc.item()
+        #            if hyps["exp_name"]=="test" and i>=3: break
+        #            if i>=nloops-l: break
+        #            if verbose and i%20==0:
+        #                p = round(100*i/nloops)
+        #                t = time.time()-starttime
+        #                print("{}% -- {}s".format(p,t), end="     \r")
+        #    div = (i+1)
+        #    val_loss = round(avg_loss/div, 5)
+        #    val_acc = round(avg_acc/div, 5)
+        #    if rank==0 and verbose:
+        #        print()
+        #        s = "Example Predictions On Validation"
+        #        print(s)
+        #        logstr += s + "\n"
+        #        inpt_dict = {
+        #            "input_ids": data["input_ids"],
+        #            "output_ids": data["output_ids"],
+        #            **package,
+        #        }
+        #        examples,s = print_examples( inpt_dict, tokenizer )
+        #        keys = list(inpt_dict.keys())
+        #        for k in keys: inpt_dict[k] = inpt_dict[k].cpu()
+        #        del inpt_dict
 
-                s = "Train Loss: {} -Train Acc: {}".format(
-                    train_loss,train_acc
-                )
-                print(s)
-                logstr += s + "\n"
-                s = "Val Loss: {} -Val Acc: {}".format(
-                    val_loss,val_acc
-                )
-                print(s)
-                logstr += s + "\n"
-                if "rmb_loss" in package:
-                    s = "RMB Train Loss: {} -RMB Train Acc: {}".format(
-                        rmb_train_loss, rmb_train_acc
-                    )
-                    print(s)
-                    logstr += s + "\n"
-                    s = "RMB Val Loss: {} -RMB Val Acc: {}".format(
-                        rmb_val_loss, rmb_val_acc
-                    )
-                    print(s)
-                    logstr += s + "\n"
-                if "csl_loss" in package:
-                    s = "CSL Train Loss: {} -CSL Train Acc: {}".format(
-                        csl_train_loss, csl_train_acc
-                    )
-                    print(s)
-                    logstr += s + "\n"
-                    s = "CSL Val Loss: {} -CSL Val Acc: {}".format(
-                        csl_val_loss, csl_val_acc
-                    )
-                    print(s)
-                    logstr += s + "\n"
-                s = "Epoch Dur: {}s".format(round(time.time()-epochtime))
-                logstr += s + "\n\n\n\n"
-                print(s)
-                print()
-                print()
+        #        logstr += s + "\n"
+        #        print()
+        #        s = "Final Stats, Epoch: {}".format(epoch)
+        #        print(s)
+        #        logstr += "\n" + s + "\n"
 
-            keys = list(data.keys())
-            for k in keys: del data[k]
-            optimizer.zero_grad()
-            if rank==0 and try_key(hyps, "save", True):
-                save_dict = {
-                    "mid_epoch": False,
-                    "epoch": epoch,
-                    "train_loss": train_loss,
-                    "train_acc":  train_acc,
-                    "val_loss":   val_loss,
-                    "val_acc":    val_acc,
-                    "state_dict": model.state_dict(),
-                    "optim_dict": optimizer.state_dict(),
-                    "hyps": hyps,
-                    "examples": examples,
-                }
-                if "rmb_loss" in package:
-                    save_dict["rmb_train_loss"] = rmb_train_loss
-                    save_dict["rmb_train_acc"] =  rmb_train_acc
-                    save_dict["rmb_val_loss"] =   rmb_val_loss
-                    save_dict["rmb_val_acc"] =    rmb_val_acc
-                if "csl_loss" in package:
-                    save_dict["csl_train_loss"] = csl_train_loss
-                    save_dict["csl_train_acc"] =  csl_train_acc
-                    save_dict["csl_val_loss"] =   csl_val_loss
-                    save_dict["csl_val_acc"] =    csl_val_acc
-                ml_utils.save_io.save_checkpt(
-                    save_dict=save_dict,
-                    save_folder=hyps["save_folder"],
-                    save_name="checkpt",
-                    epoch=epoch,
-                    ext=".pt"
-                )
-                save_training_log(hyps, logstr)
-            scheduler.step(val_loss)
+        #        s = "Train Loss: {} -Train Acc: {}".format(
+        #            train_loss,train_acc
+        #        )
+        #        print(s)
+        #        logstr += s + "\n"
+        #        s = "Val Loss: {} -Val Acc: {}".format(
+        #            val_loss,val_acc
+        #        )
+        #        print(s)
+        #        logstr += s + "\n"
+
+        #        s = "Epoch Dur: {}s".format(round(time.time()-epochtime))
+        #        logstr += s + "\n\n\n\n"
+        #        print(s)
+        #        print()
+        #        print()
+
+        #    keys = list(data.keys())
+        #    for k in keys: del data[k]
+        #    optimizer.zero_grad()
+        #    if rank==0 and hyps.get( "save", True):
+        #        save_dict = {
+        #            "mid_epoch": False,
+        #            "epoch": epoch,
+        #            "train_loss": train_loss,
+        #            "train_acc":  train_acc,
+        #            "val_loss":   val_loss,
+        #            "val_acc":    val_acc,
+        #            "state_dict": model.state_dict(),
+        #            "optim_dict": optimizer.state_dict(),
+        #            "hyps": hyps,
+        #            "examples": examples,
+        #        }
+        #        ml_utils.save_io.save_checkpt(
+        #            save_dict=save_dict,
+        #            save_folder=hyps["save_folder"],
+        #            save_name="checkpt",
+        #            epoch=epoch,
+        #            ext=".pt"
+        #        )
+        #        save_training_log(hyps, logstr)
+        #    scheduler.step(val_loss)
         keys = list(package.keys())
         for k in keys: del package[k]
         if hyps["exp_name"]=="test" and epoch==2: break
@@ -481,14 +340,8 @@ def print_examples(inpt_dict, tokenizer, n_samps=5):
                 the ground truth of the compressed context ids
             output_ids: torch tensor (B,S2)
                 the target ids
-            rmb_pred: torch tensor (B,S1,L)
-                the predicted compressed context logits
-            low: torch tensor (B,S1)
-                the predicted target ids with no prepended information
             pred: torch tensor (B,S1,L)
                 the predicted compressed context logits
-            high: torch tensor (B,S1)
-                the predicted target ids with all prepended information
         tokenizer: huggingface tokenizer
         n_samps: int
             the number of samples to print and collect
@@ -500,16 +353,10 @@ def print_examples(inpt_dict, tokenizer, n_samps=5):
             a single string of one printout loop
     """
     tensors = []
-    if "input_ids" in inpt_dict:
-        ctxs = inpt_dict["input_ids"]
-        tensors.append(ctxs)
-    if "rmb_preds" in inpt_dict:
-        rmbs = inpt_dict["rmb_preds"].argmax(-1)
-        tensors.append(rmbs)
     targs = inpt_dict["output_ids"]
     tensors.append(targs)
     preds = dict()
-    for k in ["low", "preds", "high"]:
+    for k in ["preds"]:
         if len(inpt_dict[k].shape)==3:
             preds[k] = inpt_dict[k].argmax(-1)
         else: preds[k] = inpt_dict[k]
@@ -522,35 +369,16 @@ def print_examples(inpt_dict, tokenizer, n_samps=5):
     for i in range(min(n_samps, l)):
         examp = {}
         print("Samp", i)
-        if "input_ids" in inpt_dict:
-            ctx = tokenizer.decode(ctxs[i], skip_special_tokens=False)
-            ctx = ctx.replace(tokenizer.pad_token,"").replace("\n","\\n")
-            examp["ctx"] = ctx
-            s = "Ctx: " +  ctx
-            if i == 0:
-                logstr += s + "\n"
-            print(s)
 
-        if "rmb_preds" in inpt_dict:
-            rmb = tokenizer.decode(rmbs[i], skip_special_tokens=False)
-            rmb = rmb.replace(tokenizer.pad_token,"").replace("\n","\\n")
-            examp["rmb"] = rmb
-            s = "RMB: " +  rmb
-            if i == 0:
-                logstr += s + "\n"
-            print(s)
-
-        targ = tokenizer.decode(targs[i], skip_special_tokens=False)
-        targ = targ.replace(tokenizer.pad_token, "").replace("\n","\\n")
+        targ = tokenizer.decode(targs[i])[0]
+        targ = targ.replace(tokenizer.pad, "").replace("\n","\\n")
         s = "Targ: " +  targ
         if i == 0:
             logstr += s + "\n"
         print(s)
         examp["targ"] = targ
         for k,v in preds.items():
-            pred = tokenizer.decode(
-                v[i], skip_special_tokens=False
-            ).replace("\n", "\\n")
+            pred = tokenizer.decode( v[i] )[0].replace("\n", "\\n")
             s = k + ": " + pred
             if i == 0:
                 logstr += s + "\n"

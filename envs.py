@@ -57,7 +57,8 @@ class ProbGen:
                        max_ents=3,
                        p_mult=0,
                        p_paren=0,
-                       space_mults=True):
+                       space_mults=True,
+                       *args, **kwargs):
         """
         Args:
             max_num: int
