@@ -40,7 +40,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
 
     # Make Tokenizer
     max_num = hyps.get("max_num", 20)**hyps.get("max_ents", 2)
-    tokenizer = datas.get_tokenizer(
+    tokenizer = datas.Tokenizer.get_tokenizer(
         digit_embs=hyps.get("digit_embs",True),
         max_num=max_num
     )
@@ -58,31 +58,24 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     hyps["init_samples"] = hyps.get(
         "init_samples", hyps.get("max_samples",1000000)
     )
-    data = datas.sample_data(
+    data_cache = datas.get_data_cache(
         math_env,
         tokenizer,
-        n_samples=hyps["init_samples"],
-        max_len=hyps["seq_len"]
-    )
-    data_cache = datas.DataCache(
-        max_samples=hyps["max_samples"],
+        init_samples=hyps["init_samples"],
         seq_len=hyps["seq_len"],
+        max_samples=hyps["max_samples"],
         batch_size=hyps["batch_size"],
-        init_data=data
     )
     if verbose and rank==0:
         print("Collecting Validation Data")
-    data = datas.sample_data(
+    val_samples = hyps.get("val_samples",int(0.2*hyps["max_samples"]))
+    val_cache = datas.get_data_cache(
         math_env,
         tokenizer,
-        n_samples=hyps["init_samples"],
-        max_len=hyps["seq_len"]
-    )
-    val_cache = datas.DataCache(
-        max_samples=hyps.get("val_samples", 100000),
+        init_samples=val_samples,
         seq_len=hyps["seq_len"],
-        batch_size=hyps["val_batch_size"],
-        init_data=data
+        max_samples=val_samples,
+        batch_size=hyps.get("val_batch_size",500),
     )
 
     if verbose and rank==0:
@@ -100,7 +93,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
 
     if verbose and rank==0:
         print("Creating Optimizer")
-    optimizer = torch.optim.Adam(
+    optimizer = getattr(torch.optim, hyps.get("optim_type","Adam"))(
         model.parameters(),
         lr=lr,
         weight_decay=l2
@@ -150,7 +143,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 ret_preds=True,
                 seq_len=hyps["seq_len"],
                 tforce=True,
-                gen_ids=hyps.get( "gen_ids", False)
+                gen_ids=hyps.get( "gen_ids", False),
+                prob_len=data_cache.prob_len
             )
             loss = package["loss"]
             acc = package["acc"]
@@ -227,103 +221,102 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         # Validation
         avg_loss = 0
         avg_acc = 0
-        #if rank==0 and epoch%val_mod==0:
-        #    ddp_model.eval()
-        #    if verbose:
-        #        print("Validating...")
-        #    with torch.no_grad():
-        #        nloops = hyps.get("max_val_loops",None)
-        #        if nloops is None: nloops = len(val_cache)
-        #        for i,data in enumerate(val_cache):
-        #            starttime = time.time()
-        #            if not hyps["model_parallel"]:
-        #                data = {k: v.to(rank) for k,v in data.items()}
-        #            package = ddp_model(
-        #                data,
-        #                ret_preds=True,
-        #                tforce=False,
-        #                gen_targs=hyps.get( "gen_targs", False),
-        #                seq_len=hyps["seq_len"],
-        #                gen_ids=hyps.get( "gen_ids", False)
-        #            )
-        #            loss = package["loss"]
-        #            acc = package["acc"]
-        #            preds = package["preds"]
+        if rank==0 and epoch%val_mod==0:
+            ddp_model.eval()
+            if verbose:
+                print("Validating...")
+            with torch.no_grad():
+                nloops = hyps.get("max_val_loops",None)
+                if nloops is None: nloops = len(val_cache)
+                for i,data in enumerate(val_cache):
+                    starttime = time.time()
+                    if not hyps["model_parallel"]:
+                        data = {k: v.to(rank) for k,v in data.items()}
+                    package = ddp_model(
+                        data,
+                        ret_preds=True,
+                        tforce=False,
+                        seq_len=hyps["seq_len"],
+                        prob_len=val_cache.prob_len
+                    )
+                    loss = package["loss"]
+                    acc = package["acc"]
+                    preds = package["preds"]
 
-        #            avg_loss += loss.item()
-        #            avg_acc += acc.item()
-        #            if hyps["exp_name"]=="test" and i>=3: break
-        #            if i>=nloops-l: break
-        #            if verbose and i%20==0:
-        #                p = round(100*i/nloops)
-        #                t = time.time()-starttime
-        #                print("{}% -- {}s".format(p,t), end="     \r")
-        #    div = (i+1)
-        #    val_loss = round(avg_loss/div, 5)
-        #    val_acc = round(avg_acc/div, 5)
-        #    if rank==0 and verbose:
-        #        print()
-        #        s = "Example Predictions On Validation"
-        #        print(s)
-        #        logstr += s + "\n"
-        #        inpt_dict = {
-        #            "input_ids": data["input_ids"],
-        #            "output_ids": data["output_ids"],
-        #            **package,
-        #        }
-        #        examples,s = print_examples( inpt_dict, tokenizer )
-        #        keys = list(inpt_dict.keys())
-        #        for k in keys: inpt_dict[k] = inpt_dict[k].cpu()
-        #        del inpt_dict
+                    avg_loss += loss.item()
+                    avg_acc += acc.item()
+                    if hyps["exp_name"]=="test" and i>=3: break
+                    if i>=nloops-l: break
+                    if verbose and i%20==0:
+                        p = round(100*i/nloops)
+                        t = time.time()-starttime
+                        print("{}% -- {}s".format(p,t), end="     \r")
+            div = (i+1)
+            val_loss = round(avg_loss/div, 5)
+            val_acc = round(avg_acc/div, 5)
+            if rank==0 and verbose:
+                print()
+                s = "Example Predictions On Validation"
+                print(s)
+                logstr += s + "\n"
+                inpt_dict = {
+                    "input_ids": data["input_ids"],
+                    "output_ids": data["output_ids"],
+                    **package,
+                }
+                examples,s = print_examples( inpt_dict, tokenizer )
+                keys = list(inpt_dict.keys())
+                for k in keys: inpt_dict[k] = inpt_dict[k].cpu()
+                del inpt_dict
 
-        #        logstr += s + "\n"
-        #        print()
-        #        s = "Final Stats, Epoch: {}".format(epoch)
-        #        print(s)
-        #        logstr += "\n" + s + "\n"
+                logstr += s + "\n"
+                print()
+                s = "Final Stats, Epoch: {}".format(epoch)
+                print(s)
+                logstr += "\n" + s + "\n"
 
-        #        s = "Train Loss: {} -Train Acc: {}".format(
-        #            train_loss,train_acc
-        #        )
-        #        print(s)
-        #        logstr += s + "\n"
-        #        s = "Val Loss: {} -Val Acc: {}".format(
-        #            val_loss,val_acc
-        #        )
-        #        print(s)
-        #        logstr += s + "\n"
+                s = "Train Loss: {} -Train Acc: {}".format(
+                    train_loss,train_acc
+                )
+                print(s)
+                logstr += s + "\n"
+                s = "Val Loss: {} -Val Acc: {}".format(
+                    val_loss,val_acc
+                )
+                print(s)
+                logstr += s + "\n"
 
-        #        s = "Epoch Dur: {}s".format(round(time.time()-epochtime))
-        #        logstr += s + "\n\n\n\n"
-        #        print(s)
-        #        print()
-        #        print()
+                s = "Epoch Dur: {}s".format(round(time.time()-epochtime))
+                logstr += s + "\n\n\n\n"
+                print(s)
+                print()
+                print()
 
-        #    keys = list(data.keys())
-        #    for k in keys: del data[k]
-        #    optimizer.zero_grad()
-        #    if rank==0 and hyps.get( "save", True):
-        #        save_dict = {
-        #            "mid_epoch": False,
-        #            "epoch": epoch,
-        #            "train_loss": train_loss,
-        #            "train_acc":  train_acc,
-        #            "val_loss":   val_loss,
-        #            "val_acc":    val_acc,
-        #            "state_dict": model.state_dict(),
-        #            "optim_dict": optimizer.state_dict(),
-        #            "hyps": hyps,
-        #            "examples": examples,
-        #        }
-        #        ml_utils.save_io.save_checkpt(
-        #            save_dict=save_dict,
-        #            save_folder=hyps["save_folder"],
-        #            save_name="checkpt",
-        #            epoch=epoch,
-        #            ext=".pt"
-        #        )
-        #        save_training_log(hyps, logstr)
-        #    scheduler.step(val_loss)
+            keys = list(data.keys())
+            for k in keys: del data[k]
+            optimizer.zero_grad()
+            if rank==0 and hyps.get( "save", True):
+                save_dict = {
+                    "mid_epoch": False,
+                    "epoch": epoch,
+                    "train_loss": train_loss,
+                    "train_acc":  train_acc,
+                    "val_loss":   val_loss,
+                    "val_acc":    val_acc,
+                    "state_dict": model.state_dict(),
+                    "optim_dict": optimizer.state_dict(),
+                    "hyps": hyps,
+                    "examples": examples,
+                }
+                ml_utils.save_io.save_checkpt(
+                    save_dict=save_dict,
+                    save_folder=hyps["save_folder"],
+                    save_name="checkpt",
+                    epoch=epoch,
+                    ext=".pt"
+                )
+                save_training_log(hyps, logstr)
+            scheduler.step(val_loss)
         keys = list(package.keys())
         for k in keys: del package[k]
         if hyps["exp_name"]=="test" and epoch==2: break
@@ -353,7 +346,7 @@ def print_examples(inpt_dict, tokenizer, n_samps=5):
             a single string of one printout loop
     """
     tensors = []
-    targs = inpt_dict["output_ids"]
+    targs = inpt_dict["input_ids"]
     tensors.append(targs)
     preds = dict()
     for k in ["preds"]:
@@ -372,13 +365,19 @@ def print_examples(inpt_dict, tokenizer, n_samps=5):
 
         targ = tokenizer.decode(targs[i])[0]
         targ = targ.replace(tokenizer.pad, "").replace("\n","\\n")
-        s = "Targ: " +  targ
+        s = "Sample: " +  targ
         if i == 0:
             logstr += s + "\n"
         print(s)
         examp["targ"] = targ
         for k,v in preds.items():
-            pred = tokenizer.decode( v[i] )[0].replace("\n", "\\n")
+            eos_idx=torch.argmax(
+                (v[i]==tokenizer.eos_idx).long(),
+                dim=0
+            ).item()
+            if eos_idx == 0: eos_idx = len(v[i])
+            trunc_v = v[i][:eos_idx]
+            pred = tokenizer.decode( trunc_v )[0].replace("\n", "\\n")
             s = k + ": " + pred
             if i == 0:
                 logstr += s + "\n"

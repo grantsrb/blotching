@@ -154,6 +154,8 @@ class ProbGen:
     @staticmethod
     def find_soln(prob, max_statements=np.inf):
         """
+        Finds the algorithmic solution to the initial problem string.
+
         Args:
             prob: str
                 a problem string as returned by `sample_prob`. Must
@@ -164,7 +166,8 @@ class ProbGen:
             soln: str
                 the solution as dictated by the following algorithm
                 starting from left to right, each step has its own
-                statement
+                statement. Does not include the initial problem but
+                does include an initial = sign.
                   Step 1: 
                       - move parentheticals, multiplications, and
                           ones, tens, hundreds digits to left side of
@@ -280,7 +283,7 @@ class ProbGen:
                             if statement not in statement_set:
                                 statement_set.add(statement)
                                 statements.append(statement)
-        return "=".join(statements)
+        return "=" + "=".join(statements[1:])
 
     @staticmethod
     def frag_ent(ent, mag):

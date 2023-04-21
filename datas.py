@@ -52,6 +52,7 @@ class DataCache(torch.utils.data.Dataset):
                        batch_size=128,
                        init_data=None,
                        dtype="long",
+                       prob_len=None,
                        *args, **kwargs):
         """
         max_samples: int
@@ -62,6 +63,9 @@ class DataCache(torch.utils.data.Dataset):
             the size of the batches for iteration
         init_data: torch Tensor (B, S) or None
             optional initial data
+        prob_len: int or None
+            the index location at which the problem ends and the
+            solution begins. This is useful to speed up operations.
         """
         self.batch_size = batch_size
         self.cache = torch.zeros(max_samples, seq_len)
@@ -70,6 +74,7 @@ class DataCache(torch.utils.data.Dataset):
         self.idx = 0
         if init_data is not None:
             self.add_data(init_data)
+        self.prob_len = prob_len
 
     @property
     def max_samples(self):
@@ -137,7 +142,54 @@ class DataCache(torch.utils.data.Dataset):
         )
 
 class Tokenizer:
-    def __init__(self, str2idx:dict, delimeters=[""], pad="P", null=" "):
+    @staticmethod
+    def get_tokenizer(digit_embs=True, max_num=1000):
+        """
+        Creates and returns a tokenizer object.
+    
+        Args:
+            digit_embs: bool
+                if true, will only use digits 0-9 as embeddings. Otherwise
+                will use a unique embedding for each possible numeric value.
+            max_num: int
+                the maximum possible numeric value. unnecessary if
+                digit_embs is true.
+        Returns:
+            tokenizer: Tokenizer
+        """
+        delimeters = [""]
+        if digit_embs: max_num = 10
+        else: raise NotImplemented #Need to group digits together in tokenizer
+        pad =  "P"
+        null = " "
+        eos = "E"
+        sep = "="# Semantic separator
+        special_tokens = {
+            pad: 0, # Padding token
+            null: 1, # Null token
+            sep:  2, # The semantic separation token
+            eos: 3, # EOS token
+            "+":  5,
+            "*":  6,
+            "/":  7,
+            "-":  8,
+        }
+        str2idx={
+            **special_tokens,
+            **{str(i):len(special_tokens)+i for i in range(max_num)}
+        }
+        tokenizer = Tokenizer(
+          str2idx=str2idx, pad=pad, null=null, eos=eos, sep=sep
+        )
+        return tokenizer
+
+    def __init__(self,
+                 str2idx:dict,
+                 delimeters=[""],
+                 pad="P",
+                 null=" ",
+                 sep="|",
+                 eos="E"):
         """
         Args:
             str2idx: dict
@@ -154,15 +206,26 @@ class Tokenizer:
             null: str
                 the null token. currently will break if the null
                 token is longer than a single character.
+            sep: str
+                the separation token. This token separates the problem
+                from the solution. currently will break if the sep
+                token is longer than a single character.
+            eos: str
+                the eos token. currently will break if the eos
+                token is longer than a single character.
         """
         assert len(pad)==1 and len(null)==1
         self.pad = pad
         self.null = null
+        self.eos = eos
+        self.sep = sep
         self.delimeters = sorted(delimeters, key=lambda x: -len(x))
         self.str2idx = {**str2idx}
         self.idx2str = {v:k for k,v in str2idx.items()}
         self.pad_idx = self.str2idx[self.pad]
         self.null_idx = self.str2idx[self.null]
+        self.sep_idx = self.str2idx[self.sep]
+        self.eos_idx = self.str2idx[self.eos]
 
     @property
     def n_tokens(self):
@@ -213,17 +276,10 @@ class Tokenizer:
         elif hasattr(idxs, "shape") and len(idxs.shape)==1: idxs = [idxs]
         strings = []
         for idx in idxs:
-            try:
-                if len(idx)>0:
-                    strings.append(
-                        "".join([ self.idx2str[int(i)] for i in idx ])
-                    )
-            except:
-                print(idxs)
-                print()
-                print(idx)
-                print()
-                print()
+            if len(idx)>0:
+                strings.append(
+                    "".join([ self.idx2str[int(i)] for i in idx ])
+                )
         return strings
     
     def decode(self, idxs):
@@ -243,7 +299,8 @@ class Tokenizer:
                     strings,
                     as_tensor=False,
                     max_len=None,
-                    pad=False):
+                    pad=False,
+                    add_eos=True):
         """
         Converts a list of strings to a list of token index lists
 
@@ -256,6 +313,9 @@ class Tokenizer:
                 optional argument to truncate/pad the indexes
             pad: bool
                 if true, will pad the index lists with pad indices
+            add_eos: bool
+                if true, adds the eos token to the end of every
+                string within strings
         Returns:
             idxs: list of ints
                 a list of the integer indices of each token in the
@@ -263,24 +323,31 @@ class Tokenizer:
         """
         if type(strings)==str: strings = [strings]
         idxs = []
-        for s in strings:
-          idxs.append([
-            self.str2idx[s]for s in self.tokenize(s,self.delimeters,0)
-          ])
-        if (as_tensor or pad) and not max_len:
+        for stg in strings:
+          iterator = self.tokenize(stg,self.delimeters,0)
+          idxs.append( [self.str2idx[s] for s in iterator] )
+        if add_eos:
+            for i in range(len(idxs)):
+                idxs[i].append(self.eos_idx)
+        if (as_tensor or pad) and (not max_len or max_len<=0):
             max_len = max([len(i) for i in idxs])
         if max_len or pad:
             p = self.pad_idx
             padded = []
             for i,x in enumerate(idxs):
-                if len(x)>max_len: px = x[:max_len]
+                if len(x)>=max_len: px = x[:max_len]
                 else: px = x+[p for _ in range(max_len-len(x))]
                 idxs[i] = px
         if as_tensor:
             return torch.LongTensor(idxs)
         return idxs
 
-    def __call__(self, strings, as_tensor=False, max_len=None, pad=False):
+    def __call__(self,
+                 strings,
+                 as_tensor=False,
+                 max_len=None,
+                 pad=False,
+                 add_eos=True):
         """
         Converts a list of strings to a list of tokens
 
@@ -293,48 +360,21 @@ class Tokenizer:
                 optional argument to truncate/pad the indexes
             pad: bool
                 if true, will pad the index lists with pad indices
+            add_eos: bool
+                if true, adds the eos token to the end of every
+                string within strings
         Returns:
             idxs: list of ints or LongTensor
                 a list of the integer indices of each token in the
                 argued strings
         """
         return self.str_to_idxs(
-            strings, as_tensor=as_tensor, max_len=max_len, pad=pad
+            strings,
+            as_tensor=as_tensor,
+            max_len=max_len,
+            pad=pad,
+            add_eos=add_eos
         )
-
-def get_tokenizer(digit_embs=True, max_num=1000):
-    """
-    Creates and returns a tokenizer object.
-
-    Args:
-        digit_embs: bool
-            if true, will only use digits 0-9 as embeddings. Otherwise
-            will use a unique embedding for each possible numeric value.
-        max_num: int
-            the maximum possible numeric value. unnecessary if
-            digit_embs is true.
-    Returns:
-        tokenizer: Tokenizer
-    """
-    delimeters = [""]
-    if digit_embs: max_num = 10
-    else: raise NotImplemented #Need to group digits together in tokenizer
-    pad =  "P"
-    null = " "
-    str2idx={
-        pad: 0, # Padding token
-        null: 1, # Null token
-        "=":  2,
-        "+":  3,
-        "*":  4,
-        "-":  5,
-        "/":  6,
-        **{str(i):6+i for i in range(max_num)}
-    }
-    tokenizer = Tokenizer(
-        str2idx=str2idx, pad=pad, null=null
-    )
-    return tokenizer
 
 def sample_data(math_env,
                 tokenizer,
@@ -355,9 +395,14 @@ def sample_data(math_env,
         max_len: int
             the max sequence length
     Returns:
-        data: torch LongTensor (n_samples, max_len)
+        probs: torch LongTensor (n_samples, (max_digits+1)*max_ents-1)
+        solns: torch LongTensor (n_samples, max_len-probs.shape[1])
     """
-    data = torch.zeros(n_samples, max_len)
+    plen = (len(str(math_env.max_num))+1)*math_env.max_ents - 1
+    slen = max_len-plen
+    assert slen>0, "Needs larger max_len!"
+
+    probs = []
     solns = []
     for i in range(n_samples):
         prob = ProbGen.sample_prob(
@@ -366,11 +411,67 @@ def sample_data(math_env,
             p_mult=math_env.p_mult,
             space_mults=math_env.space_mults
         )
+        probs.append(prob)
         soln = ProbGen.find_soln(prob)
         solns.append(soln)
-        #indices = tokenizer(soln, as_tensor=True, max_len=max_len)
-        #data[i] = indices[0]
-    data = tokenizer(solns, as_tensor=True, max_len=max_len)
-    return data
 
+    probs = tokenizer(probs,
+        as_tensor=True,
+        max_len=plen,
+        pad=True,
+        add_eos=False
+    )
+    solns = tokenizer(solns,
+        as_tensor=True,
+        max_len=slen,
+        pad=True,
+        add_eos=True
+    )
+    return probs, solns
+
+def get_data_cache(math_env,
+                   tokenizer,
+                   init_samples=100000,
+                   seq_len=100,
+                   max_samples=None,
+                   batch_size=128,
+                   *args, **kwargs):
+    """
+    Creates an initial data_cache for storing and providing data.
+
+    Args:
+        math_env: ProbGen object
+            this is the math problem generator object
+        tokenizer: Tokenizer object
+            if None, this function will create and return a tokenizer
+            object
+        init_samples: int
+            the initial number of data points to sample
+        seq_len: int
+            the desired sequence lengths of the samples
+        max_samples: int or None
+            a parameter to limit the total amount of data in the cache.
+            if None, will default to init_samples
+        batch_size: int
+            the batch_size for the DataCache iterable
+    Returns:
+        data_cache: DataCache
+    """
+    if max_samples is None: max_samples = init_samples
+    probs, solns = sample_data(
+        math_env,
+        tokenizer,
+        n_samples=init_samples,
+        max_len=seq_len
+    )
+    prob_len = probs.shape[1]
+    data = torch.cat([probs, solns], dim=1)
+    data_cache = DataCache(
+        max_samples=max_samples,
+        seq_len=seq_len,
+        batch_size=batch_size,
+        init_data=data,
+        prob_len=prob_len
+    )
+    return data_cache
 

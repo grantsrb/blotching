@@ -15,6 +15,9 @@ class Model(torch.nn.Module):
                        norm_first:bool=True,
                        blotch_p:int=0.3,
                        drop_p:float=0.5,
+                       max_posencs:int=1000,
+                       posenc_drop_p:float=None,
+                       learn_posencs:bool=False,
                        *args, **kwargs):
         """
         n_tokens: int
@@ -39,6 +42,14 @@ class Model(torch.nn.Module):
             the blotch probability. 0 means no blotching.
         drop_p: float
             the dropout probability. 0 means no dropout.
+        max_posencs: int
+            the number of possible embeddings. If
+        posenc_drop_p: float optional
+            the dropout probability for positional encodings. 0 means
+            no dropout. defaults to drop_p if none
+        learn_posencs: bool
+            determines whether or not gradients are backpropagated into
+            the positional encodings.
         """
         super().__init__()
         self.n_tokens = n_tokens
@@ -50,6 +61,10 @@ class Model(torch.nn.Module):
         self.drop_p = drop_p
         self.posenc_type = posenc_type
         self.norm_first = norm_first
+        self.max_posencs = max_posencs
+        self.posenc_drop_p = posenc_drop_p
+        if self.posenc_drop_p is None: self.posenc_drop_p = drop_p
+        self.learn_posencs = learn_posencs
 
     def get_device(self):
         return next(self.parameters()).get_device()
@@ -60,12 +75,19 @@ class TransformerModel(Model):
         self.model_type = 'Transformer'
         self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
         self.pos_encoder = globals()[self.posenc_type](
-            self.d_model, self.drop_p
+            self.d_model,
+            self.posenc_drop_p,
+            max_len=self.max_posencs,
+            learnable=self.learn_posencs
         )
         d_hid = self.h_mult*self.d_model
         encoder_layer = torch.nn.TransformerEncoderLayer(
-            self.d_model, self.n_heads, d_hid,
-            self.drop_p, batch_first=True, norm_first=self.norm_first
+            self.d_model,
+            self.n_heads,
+            d_hid,
+            self.drop_p,
+            batch_first=True,
+            norm_first=self.norm_first
         )
         self.transformer_encoder = nn.TransformerEncoder(
             encoder_layer, self.n_layers
@@ -85,7 +107,8 @@ class TransformerModel(Model):
                       mask:torch.Tensor=None,
                       pad_mask:torch.Tensor=None,
                       is_causal:bool=None,
-                      tforce:bool=True):
+                      tforce:bool=True,
+                      n_steps:int=10):
         """
         Arguments:
             src: Tensor, shape ``[batch_size, seq_len]``
@@ -97,27 +120,53 @@ class TransformerModel(Model):
                 attention.
             tforce: bool
                 determines whether or not to teacherforce
-
+            n_steps: int
+                the number of prediction steps if not using teacher
+                forcing
         Returns:
-            output Tensor of shape ``[batch_size, seq_len, n_tokens]``
+            if tforce:
+              output Tensor of shape ``[batch_size, seq_len, n_tokens]``
+            else:
+              output Tensor of shape ``[batch_size, n_steps, n_tokens]``
         """
-        if not tforce: raise NotImplemented
-        src = self.embeddings(src)
-        src = self.pos_encoder(src)
+        embs = self.embeddings(src)
+        embs = self.pos_encoder(embs)
         if mask is None:
             mask = generate_square_subsequent_mask(
-                src.shape[1]
+                embs.shape[1]
             ).to(self.get_device())
         elif is_causal:
-            temp = generate_square_subsequent_mask(src.shape[1])
+            temp = generate_square_subsequent_mask(embs.shape[1])
             mask = temp|mask
             mask = mask.to(self.get_device())
-        output = self.transformer_encoder(
-            src,
-            mask=mask,
-            src_key_padding_mask=pad_mask
-        )
-        output = self.decoder(output)
+
+        if tforce:
+            output = self.transformer_encoder(
+                embs,
+                mask=mask,
+                src_key_padding_mask=pad_mask
+            )
+            output = self.decoder(output)
+        else:
+            og_len = embs.shape[1]
+            pad_mask = torch.nn.functional.pad(
+                pad_mask, (0, n_steps), value=False
+            )
+            embs = torch.nn.functional.pad(
+                embs, (0,0,0,n_steps), value=0
+            )
+            preds = []
+            for step in range(n_steps):
+                output = self.transformer_encoder(
+                    embs[:,:og_len+step],
+                    src_key_padding_mask=pad_mask[:,:og_len+step]
+                )
+                pred = self.decoder(output[:,-1])
+                preds.append(pred)
+                if step < n_steps-1:
+                    argmaxs = torch.argmax(pred, dim=-1)
+                    embs[:,og_len+step+1] = self.embeddings(argmaxs)
+            output = torch.stack(preds, dim=1)
         return output
 
 def generate_square_subsequent_mask(sz: int) -> Tensor:
@@ -128,26 +177,54 @@ def generate_square_subsequent_mask(sz: int) -> Tensor:
     #return torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
     return torch.triu(torch.ones(sz, sz), diagonal=1).bool()
 
-class SinPositionalEncoding(nn.Module):
-    def __init__(self, d_model:int, dropout:float=0.1, max_len:int=5000):
+class RandPositionalEncoding(nn.Module):
+    def __init__(self,
+                 d_model:int,
+                 dropout:float=0.1,
+                 max_len:int=1000,
+                 learnable:bool=False):
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
 
-        position = torch.arange(max_len).unsqueeze(1)
         scale = (-math.log(10000.0) / d_model)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * scale)
-        pe = torch.zeros(max_len, 1, d_model)
-        pe[:, 0, 0::2] = torch.sin(position * div_term)
-        pe[:, 0, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
+        pe = scale*torch.randn(max_len, d_model)
+        if learnable: self.pe = torch.nn.Parameter(pe)
+        else: self.register_buffer('pe', pe)
 
     def forward(self, x: Tensor) -> Tensor:
         """
         Arguments:
             x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
         """
-        x = x + self.pe[:x.size(0)]
-        return self.dropout(x)
+        perm = torch.randperm(self.pe.shape[0]).long()[:x.size(1)]
+        x = x + self.dropout(self.pe[torch.sort(perm).values.long()])
+        return x
+
+class SinPositionalEncoding(nn.Module):
+    def __init__(self,
+                 d_model:int,
+                 dropout:float=0.1,
+                 max_len:int=1000,
+                 learnable:bool=False):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        position = torch.arange(max_len).unsqueeze(1)
+        scale = (-math.log(10000.0) / d_model)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * scale)
+        pe = torch.zeros(max_len, 1, d_model)
+        pe[:, 0, 0::2] = torch.sin(position * div_term)
+        pe[:, 0, 1::2] = torch.cos(position * div_term)
+
+        if learnable: self.pe = torch.nn.Parameter(pe)
+        else: self.register_buffer('pe', pe)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+        """
+        x = x + self.dropout(self.pe[:x.size(1)])
+        return x
 
 class LossWrapper(torch.nn.Module):
     """
@@ -176,6 +253,7 @@ class LossWrapper(torch.nn.Module):
                                              gen_targs=False,
                                              gen_ids=False,
                                              no_grad=False,
+                                             prob_len=None,
                                              temperature=1.,
                                              top_k=5):
         """
@@ -202,6 +280,9 @@ class LossWrapper(torch.nn.Module):
                 a temperature parameter for softmax sampling. Set to
                 low number for high confidence sampling, high value
                 for low confidence sampling
+            prob_len: int or None
+                the index at which the problem is separated from
+                the solution. If none, it is found via torch indexing.
             no_grad: bool
                 if true, this function will not call .backward() on
                 the loss. If false, this function will only call
@@ -229,16 +310,30 @@ class LossWrapper(torch.nn.Module):
         ret_dict = dict()
         pad_mask = data["input_ids"]==self.tokenizer.pad_idx
 
-        preds = self.model(
-            data["input_ids"],
-            pad_mask=pad_mask,
-            is_causal=True,
-            tforce=tforce
-        )
+        if tforce:
+            preds = self.model(
+                data["input_ids"],
+                pad_mask=pad_mask,
+                is_causal=True,
+                tforce=tforce
+            )
+            out_ids = data["output_ids"]
+        else:
+            if prob_len is None:
+                s = self.tokenizer.prob_len
+                prob_len = torch.argmax(data["input_ids"][0]==s,dim=-1)
+            preds = self.model(
+                data["input_ids"][...,:prob_len],
+                pad_mask=pad_mask[...,:prob_len],
+                is_causal=True,
+                tforce=tforce,
+                n_steps=self.hyps["seq_len"]-prob_len-1
+            )
+            pad_mask = pad_mask[:,prob_len:]
+            out_ids = data["output_ids"][:,prob_len:]
 
         anti_pad_mask = ~pad_mask.reshape(-1)
         ps = preds.reshape(-1, preds.shape[-1])[anti_pad_mask]
-        out_ids = data["output_ids"]
         labels = out_ids.reshape(-1)[anti_pad_mask]
         loss=self.loss_fxn(ps,labels)*self.loss_scale
         argmax = torch.argmax(ps, dim=-1)
@@ -287,6 +382,7 @@ def blotch(idxs, sep_idx, blotch_p=0.4, indy_blotching=False):
         blotch_mask: torch BoolTensor (B,S,S) or (B,S)
             the shape will depend on the argument for indy_blotching.
     """
+    # TODO: use argsort for finding semantic separation coords?
     seps = idxs==sep_idx
     sep_coords = torch.nonzero(seps)
     if indy_blotching:

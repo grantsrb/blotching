@@ -46,13 +46,6 @@ then running the following command:
         the number of parallel processes to use for the initial
         encoding of the data.
 
-    "gen_targs": bool
-        if true, the model will generate the target tokens
-    "gen_ids": bool
-        if true, the model will use the generated ids rather than
-        the logits as the ground truth. only applies if `gen_targs` is
-        true
-
     "max_val_loops": int
         enforces a limit on the number of validation iterations. This
         is useful for speeding up trainings
@@ -63,23 +56,6 @@ then running the following command:
         during training, the model will be saved every `checkpt_mod`
         iterations
 
-    "rmb_task": bool
-        includes rememberance task (i.e. autoencoder task) if true.
-        otherwise, only calculates forward prediction from cmpr context
-    "rmb_only": bool
-        if true, uses rmb task only instead of forward prediction task
-    "csl_task": bool
-        if true, includes the traditional causal language modeling on
-        the whole context (cmpr context + forward context) without
-        using the context compression. This loss is in addition to the
-        cmpr and rmb losses. Must set `train_lmhead` and or `train_embs`
-        to true for this task to have any effect.
-
-    "train_lmhead": bool
-        if true, the final output layer is trainable
-    "train_embs": bool
-        if true, the embedding layer is trainable
-
     "n_epochs": int
         the total number of training iterations
     "batch_size": int
@@ -88,47 +64,29 @@ then running the following command:
         the learning rate
     "l2": float
         the l2 norm regularization. aka weight decay
-    "cmp_len": int
-        the length of the sequence that will be compressed. if doing
-        `rmb_only`, you should use `seq_len` instead as `cmp_len` is
-        ignored.
     "seq_len": int
         the data sequence length to use. for causal modeling, `seq_len`
         refers to the sequence length post compression, so the model will
         compress `cmp_len` tokens and then predict `seq_len` tokens.
         if doing rmb_only, `cmp_len` is ignored
-    "seq_overlap": int
-        the number of non-compressed tokens overlapping with the
-        sequence of tokens that is being compressed. This is kind of
-        like a stride parameter. 0 means the stride is the full
-        compression sequence length
+    "blotch_p": float
+        the blotch probability. 0 means no blotching. blotching is
+        effectively contiguous dropout. It is kept to complete
+        sequences, however, rather than fully random.
 
-    "n_cmps": int
-        the number of compression tokens to use for compression
-    "cmp_layer": str or int
-        the layer of the transformer from which to take the compression
-        representation. -1 will take the last layer, "half" will take
-        from the middle layer. All integer arguments must be within
-        the number of layers of the model.
-    "proj_cmpr": bool
-        if true, projects the cmpr' representations (the representations
-        at the intermediate layer of the transformer formed during
-        compression) using a linear weight matrix before using them as
-        input to the forward/auxiliary tasks.
-    "proj_hid_mult": float or None
-        if a float value is argued and `proj_cmpr` is true, the
-        projection will use a 2 layer neural net with a hidden layer
-        size of `proj_hid_mult * h_size` instead of using a single
-        linear projection.
-    "sep_cmpr": bool
-        if true, an additional token is created and inserted between
-        the cmpr tokens and the compression sequence during compression
-    "rmb_rask": bool
-        if true, and using openwebtext dataset, model will have
-        auxiliary compression autoencoding task to reconstruct the
-        compressed sequence.
-    "rmb_only": bool
-        if true, model will only perform autoencoder task.
+    "posenc_type": str
+        the type of positional encodings. As of now, valid arguments
+        are "RandPositionalEncoding" and "SinPositionalEncoding"
+    "max_posencs": int
+        the maximum number of positional encodings. In the case of
+        SinPositionalEncoding, this is the maximum possible length
+        of a sequence. In the case of the RandPositionalEncodings,
+        this is the number of positional encodings to sample from.
+    "posenc_drop_p": float
+        the dropout specific to positional encodings.
+    "learnable_posencs": bool
+        if true, gradients are backpropagated into the positional
+        encodings
 
     "n_grad_loops": int
         the number of backprop loops to perform before performing an
@@ -136,3 +94,4 @@ then running the following command:
         be equivalent to stepping the optimizer once per iteration with
         a batch size of batch_size*n_grad_loops
 
+    
