@@ -235,7 +235,7 @@ class TransformerModel(Model):
                 src_key_padding_mask=pad_mask[:,:S+step]
             )
             pred = self.decoder(output[:,-1])
-            preds[:,S+step] = pred
+            preds[:,S-1+step] = pred
             if step < n_steps-1:
                 argmaxs = torch.argmax(pred, dim=-1)
                 embs[:,S+step] = self.embeddings(argmaxs)
