@@ -198,7 +198,7 @@ class TransformerModel(Model):
                 the number of prediction steps if not using teacher
                 forcing
         Returns:
-            output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
+            output Tensor of shape ``[bsize, seq_len+n_steps-1, n_tokens]``
         """
 
         embs = self.embeddings(src)
@@ -210,13 +210,13 @@ class TransformerModel(Model):
             embs, (0,0,0,n_steps), value=0
         )
         preds = torch.zeros(
-            (B,S+n_steps,self.n_tokens),
+            (B,S+n_steps-1,self.n_tokens),
             device=embs.get_device()
         )
-        preds[:,:S].scatter_(
+        preds[:,:S-1].scatter_(
             dim=-1,
-            index=src[..., None],
-            src=torch.ones_like(preds[:, :S])
+            index=src[:, 1:S, None],
+            src=torch.ones_like(preds[:, :S-1])
         )
         if mask is None:
             mask = generate_square_subsequent_mask(
@@ -400,7 +400,7 @@ class LossWrapper(torch.nn.Module):
             if prob_len is None:
                 s = self.tokenizer.sep_idx
                 prob_len = torch.argmax(data["input_ids"][0]==s,dim=-1)
-            # +1 to include intial equals sign
+            # +1 to include intial equals sign in seed sequence
             plen = prob_len + 1
             inpts = data["input_ids"][...,:plen]
             preds = self.model(
@@ -408,7 +408,7 @@ class LossWrapper(torch.nn.Module):
                 pad_mask=inpt_pad_mask[..., :plen],
                 is_causal=True,
                 tforce=tforce,
-                n_steps=self.hyps["seq_len"]-plen-1
+                n_steps=self.hyps["seq_len"]-plen
             )
 
         if not incl_intl_prob:

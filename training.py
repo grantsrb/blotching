@@ -130,14 +130,15 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         ddp_model.train()
         avg_loss = 0
         avg_acc = 0
+        iterable = iter(data_cache)
         nloops = hyps.get("n_train_loops", None)
-        nloops = len(data_cache) if nloops is None else nloops
-        nloops = min(nloops,len(data_cache))
+        nloops = len(iterable) if nloops is None else nloops
+        nloops = min(nloops,len(iterable))
         checkpt_mod = hyps.get( "checkpt_mod", None)
         checkpt_mod = np.inf if checkpt_mod is None else checkpt_mod
         val_mod = hyps.get( "val_mod", 1)
         optimizer.zero_grad()
-        for i,data in enumerate(data_cache):
+        for i,data in enumerate(iterable):
             starttime = time.time()
             if not hyps["model_parallel"]:
                 data = {k: v.to(rank) for k,v in data.items()}
@@ -231,8 +232,10 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             if verbose:
                 print("Validating...")
             with torch.no_grad():
+                iterable = iter(val_cache)
                 nloops = hyps.get("max_val_loops",None)
-                if nloops is None: nloops = len(val_cache)
+                if nloops is None: nloops = len(iterable)
+                nloops = min(nloops, len(iterable))
                 for i,data in enumerate(val_cache):
                     starttime = time.time()
                     if not hyps["model_parallel"]:
@@ -253,10 +256,10 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     avg_acc += acc.item()
                     if hyps["exp_name"]=="test" and i>=3: break
                     if i>=nloops-l: break
-                    if verbose and i%20==0:
-                        p = round(100*i/nloops)
-                        t = time.time()-starttime
-                        print("{}% -- {}s".format(p,t), end="     \r")
+                    if verbose:
+                        p = round(100*i/nloops, 2)
+                        t = round(time.time()-starttime, 4)
+                        print("{}% -- {}s".format(p,t), end="         \r")
             div = (i+1)
             val_loss = round(avg_loss/div, 5)
             val_acc = round(avg_acc/div, 5)

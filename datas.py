@@ -18,6 +18,9 @@ class DataIterable:
     def __len__(self):
         return len(self.perm)//self.batch_size
 
+    def __iter__(self):
+        return self
+
     def __next__(self):
         """
         Returns:
