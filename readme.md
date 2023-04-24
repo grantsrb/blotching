@@ -4,9 +4,12 @@
 After cloning, you will first need to initialize the `ml_utils`
 submodule. You can do this with the following commands at the terminal:
 
+    $ git clone https://github.com/grantsrb/semantic_blotching.git
+    $ cd semantic_blotching
     $ cd ml_utils
     $ git submodule init
     $ git submodule update
+    $ cd ../
 
 Next, you will need to make sure you have all necessary pacakges
 installed.
