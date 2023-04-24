@@ -112,6 +112,9 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
       )
     else: ddp_model = wrapped_model
 
+    #############################################################
+    # Training
+    #############################################################
     if rank==0 and verbose: print("Beginning Training")
     for epoch in range(n_epochs):
         epochtime = time.time()
@@ -143,8 +146,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 ret_preds=True,
                 seq_len=hyps["seq_len"],
                 tforce=True,
-                gen_ids=hyps.get( "gen_ids", False),
-                prob_len=data_cache.prob_len
+                prob_len=data_cache.prob_len,
+                incl_intl_prob=hyps.get("incl_intl_prob", False)
             )
             loss = package["loss"]
             acc = package["acc"]
@@ -218,7 +221,9 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             del inpt_dict
         del package["preds"]
 
+        #############################################################
         # Validation
+        #############################################################
         avg_loss = 0
         avg_acc = 0
         if rank==0 and epoch%val_mod==0:
@@ -237,7 +242,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                         ret_preds=True,
                         tforce=False,
                         seq_len=hyps["seq_len"],
-                        prob_len=val_cache.prob_len
+                        prob_len=val_cache.prob_len,
+                        incl_intl_prob=hyps.get("incl_intl_prob", False)
                     )
                     loss = package["loss"]
                     acc = package["acc"]
@@ -371,12 +377,12 @@ def print_examples(inpt_dict, tokenizer, n_samps=5):
         print(s)
         examp["targ"] = targ
         for k,v in preds.items():
-            eos_idx=torch.argmax(
+            eos_idx = torch.argmax(
                 (v[i]==tokenizer.eos_idx).long(),
                 dim=0
             ).item()
-            if eos_idx == 0: eos_idx = len(v[i])
-            trunc_v = v[i][:eos_idx]
+            if eos_idx <= 0: eos_idx = len(v[i])
+            trunc_v = v[i][:eos_idx+1]
             pred = tokenizer.decode( trunc_v )[0].replace("\n", "\\n")
             s = k + ": " + pred
             if i == 0:

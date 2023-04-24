@@ -35,13 +35,19 @@ def tokenizer_tests():
             print("Back:", back[0])
 
 def data_cache_tests():
-    max_len = 10
+    max_len = 30
     n_samps = 5
     batch_size = 5
     tokenizer = datas.Tokenizer.get_tokenizer()
     probs, solns = datas.sample_data(
       math_env, tokenizer, n_samples=n_samps, max_len=max_len
     )
+    print("Probs:", probs)
+    print("Probs:", tokenizer(probs))
+    print()
+    print("Solns:", solns)
+    print("Solns:", tokenizer(solns))
+    print()
     init_data = torch.cat([probs, solns], dim=1)
     all_data = {str(x[:-1]) for x in init_data}
     cache = datas.DataCache(

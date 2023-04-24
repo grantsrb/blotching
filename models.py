@@ -1,6 +1,7 @@
 from torch import Tensor
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import ml_utils.utils as utils
 import math
@@ -111,9 +112,9 @@ class TransformerModel(Model):
                       n_steps:int=10):
         """
         Arguments:
-            src: Tensor, shape ``[batch_size, seq_len]``
+            src: Tensor, shape ``[bsize, seq_len]``
             mask: Tensor, shape ``[seq_len, seq_len]``
-            pad_mask: Tensor, shape ``[batch_size, seq_len]``
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
             is_causal: bool
                 If specified, applies a causal mask as mask (optional)
                 and ignores attn_mask for computing scaled dot product
@@ -125,12 +126,98 @@ class TransformerModel(Model):
                 forcing
         Returns:
             if tforce:
-              output Tensor of shape ``[batch_size, seq_len, n_tokens]``
+              output Tensor of shape ``[bsize, seq_len, n_tokens]``
             else:
-              output Tensor of shape ``[batch_size, n_steps, n_tokens]``
+              output Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
+        """
+
+        if tforce:
+            return self.tforce_fwd(
+                src=src,
+                mask=mask,
+                pad_mask=pad_mask,
+                is_causal=is_causal,
+            )
+        else:
+            return self.freedom_fwd(
+                src=src,
+                mask=mask,
+                pad_mask=pad_mask,
+                is_causal=is_causal,
+                n_steps=n_steps,
+            )
+
+    def tforce_fwd(self, src:torch.Tensor,
+                      mask:torch.Tensor=None,
+                      pad_mask:torch.Tensor=None,
+                      is_causal:bool=None):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Tensor, shape ``[seq_len, seq_len]``
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+            is_causal: bool
+                If specified, applies a causal mask as mask (optional)
+                and ignores attn_mask for computing scaled dot product
+                attention.
+        Returns:
+            output Tensor of shape ``[bsize, seq_len, n_tokens]``
         """
         embs = self.embeddings(src)
+        if mask is None:
+            mask = generate_square_subsequent_mask(
+                embs.shape[1]
+            ).to(self.get_device())
+        elif is_causal:
+            temp = generate_square_subsequent_mask(embs.shape[1])
+            mask = temp|mask
+            mask = mask.to(self.get_device())
         embs = self.pos_encoder(embs)
+        output = self.transformer_encoder(
+            embs,
+            mask=mask,
+            src_key_padding_mask=pad_mask
+        )
+        return self.decoder(output)
+
+    def freedom_fwd(self, src:torch.Tensor,
+                      mask:torch.Tensor=None,
+                      pad_mask:torch.Tensor=None,
+                      is_causal:bool=None,
+                      n_steps:int=10):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Tensor, shape ``[seq_len, seq_len]``
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+            is_causal: bool
+                If specified, applies a causal mask as mask (optional)
+                and ignores attn_mask for computing scaled dot product
+                attention.
+            n_steps: int
+                the number of prediction steps if not using teacher
+                forcing
+        Returns:
+            output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
+        """
+
+        embs = self.embeddings(src)
+        B,S,E = embs.shape
+        pad_mask = torch.nn.functional.pad(
+            pad_mask, (0, n_steps), value=False
+        )
+        embs = torch.nn.functional.pad(
+            embs, (0,0,0,n_steps), value=0
+        )
+        preds = torch.zeros(
+            (B,S+n_steps,self.n_tokens),
+            device=embs.get_device()
+        )
+        preds[:,:S].scatter_(
+            dim=-1,
+            index=src[..., None],
+            src=torch.ones_like(preds[:, :S])
+        )
         if mask is None:
             mask = generate_square_subsequent_mask(
                 embs.shape[1]
@@ -140,34 +227,19 @@ class TransformerModel(Model):
             mask = temp|mask
             mask = mask.to(self.get_device())
 
-        if tforce:
+        for step in range(n_steps):
+            temp = self.pos_encoder(embs[:,:S+step])
             output = self.transformer_encoder(
-                embs,
-                mask=mask,
-                src_key_padding_mask=pad_mask
+                temp,
+                mask=mask[:S+step, :S+step],
+                src_key_padding_mask=pad_mask[:,:S+step]
             )
-            output = self.decoder(output)
-        else:
-            og_len = embs.shape[1]
-            pad_mask = torch.nn.functional.pad(
-                pad_mask, (0, n_steps), value=False
-            )
-            embs = torch.nn.functional.pad(
-                embs, (0,0,0,n_steps), value=0
-            )
-            preds = []
-            for step in range(n_steps):
-                output = self.transformer_encoder(
-                    embs[:,:og_len+step],
-                    src_key_padding_mask=pad_mask[:,:og_len+step]
-                )
-                pred = self.decoder(output[:,-1])
-                preds.append(pred)
-                if step < n_steps-1:
-                    argmaxs = torch.argmax(pred, dim=-1)
-                    embs[:,og_len+step+1] = self.embeddings(argmaxs)
-            output = torch.stack(preds, dim=1)
-        return output
+            pred = self.decoder(output[:,-1])
+            preds[:,S+step] = pred
+            if step < n_steps-1:
+                argmaxs = torch.argmax(pred, dim=-1)
+                embs[:,S+step] = self.embeddings(argmaxs)
+        return preds
 
 def generate_square_subsequent_mask(sz: int) -> Tensor:
     """
@@ -250,10 +322,9 @@ class LossWrapper(torch.nn.Module):
 
     def forward(self, data, ret_preds=False, seq_len=30,
                                              tforce=True,
-                                             gen_targs=False,
-                                             gen_ids=False,
                                              no_grad=False,
                                              prob_len=None,
+                                             incl_intl_prob=False,
                                              temperature=1.,
                                              top_k=5):
         """
@@ -276,6 +347,9 @@ class LossWrapper(torch.nn.Module):
             tforce: bool
                 determines whether model should use teacher forcing for
                 predictions or not.
+            incl_intl_prob: bool
+                if true, will include the initial problem in the loss.
+                if false, will exclude initial problem from the loss.
             temperature: float
                 a temperature parameter for softmax sampling. Set to
                 low number for high confidence sampling, high value
@@ -308,33 +382,47 @@ class LossWrapper(torch.nn.Module):
                     the rmb top n accuracy.
         """
         ret_dict = dict()
-        pad_mask = data["input_ids"]==self.tokenizer.pad_idx
+        pad_idx = self.tokenizer.pad_idx
+        eos_idx = self.tokenizer.eos_idx
+        inpt_pad_mask = (data["input_ids"]==pad_idx)
+        inpt_pad_mask = inpt_pad_mask|(data["input_ids"]==eos_idx)
+        out_pad_mask  = data["output_ids"]==pad_idx
 
+        # Need to be careful with intermediate padding
         if tforce:
             preds = self.model(
                 data["input_ids"],
-                pad_mask=pad_mask,
+                pad_mask=inpt_pad_mask,
                 is_causal=True,
                 tforce=tforce
             )
-            out_ids = data["output_ids"]
         else:
             if prob_len is None:
-                s = self.tokenizer.prob_len
+                s = self.tokenizer.sep_idx
                 prob_len = torch.argmax(data["input_ids"][0]==s,dim=-1)
+            # +1 to include intial equals sign
+            plen = prob_len + 1
+            inpts = data["input_ids"][...,:plen]
             preds = self.model(
-                data["input_ids"][...,:prob_len],
-                pad_mask=pad_mask[...,:prob_len],
+                inpts,
+                pad_mask=inpt_pad_mask[..., :plen],
                 is_causal=True,
                 tforce=tforce,
-                n_steps=self.hyps["seq_len"]-prob_len-1
+                n_steps=self.hyps["seq_len"]-plen-1
             )
-            pad_mask = pad_mask[:,prob_len:]
-            out_ids = data["output_ids"][:,prob_len:]
 
-        anti_pad_mask = ~pad_mask.reshape(-1)
-        ps = preds.reshape(-1, preds.shape[-1])[anti_pad_mask]
-        labels = out_ids.reshape(-1)[anti_pad_mask]
+        if not incl_intl_prob:
+            if prob_len is None:
+                s = self.tokenizer.sep_idx
+                prob_len = torch.argmax(data["input_ids"][0]==s,dim=-1)
+            inpt_pad_mask[...,:prob_len] = True
+            out_pad_mask [...,:prob_len] = True
+
+        out_ids = data["output_ids"]
+        inpt_mask = ~inpt_pad_mask.reshape(-1)
+        out_mask =  ~out_pad_mask.reshape(-1)
+        ps = preds.reshape(-1, preds.shape[-1])[inpt_mask]
+        labels = out_ids.reshape(-1)[out_mask]
         loss=self.loss_fxn(ps,labels)*self.loss_scale
         argmax = torch.argmax(ps, dim=-1)
         acc = (argmax==labels).float().mean()
@@ -343,8 +431,11 @@ class LossWrapper(torch.nn.Module):
 
         if self.training and not no_grad: loss.backward()
 
-        if ret_preds: ret_dict["preds"] = preds
-
+        if ret_preds:
+            ret_dict["preds"] = preds.argmax(-1)
+            if not incl_intl_prob and tforce:
+                ids = data["output_ids"][...,:prob_len]
+                ret_dict["preds"][...,:prob_len] = ids
         return ret_dict
 
 def blotch(idxs, sep_idx, blotch_p=0.4, indy_blotching=False):

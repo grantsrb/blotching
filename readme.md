@@ -88,6 +88,12 @@ then running the following command:
         if true, gradients are backpropagated into the positional
         encodings
 
+    "incl_intl_prob": bool
+        if true, will include the initial problem in the loss. Otherwise
+        will exclude the initial problem from the causal modeling.
+        It is impossible to predict the initial problem, as such it is
+        not important to train to predict the initial problem.
+
     "n_grad_loops": int
         the number of backprop loops to perform before performing an
         optimizer step. the loss is divided by this quantity so as to

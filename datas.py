@@ -2,23 +2,18 @@ import torch
 from envs import ProbGen
 
 class DataIterable:
-    def __init__(self, data, endx=None, batch_size=128):
+    def __init__(self, data, batch_size=128):
         """
         Args:
             data: torch tensor (N, S)
                 N is total samples, S is seq len
-            endx: int or None
-                if an int is argued, it should denote the last row
-                of the data tensor that contains data. If None, it is
-                assumed that the data tensor is full
             batch_size: int
                 the batch size
         """
         self.data = data
         self.batch_size = batch_size
         self.idx = 0
-        if endx is None: endx = len(data)
-        self.perm = torch.randperm(endx).long()
+        self.perm = torch.randperm(len(self.data)).long()
 
     def __len__(self):
         return len(self.perm)//self.batch_size
@@ -106,7 +101,7 @@ class DataCache(torch.utils.data.Dataset):
             self.cache[:,:sl] = new_data[:self.max_samples, :sl]
             self.idx = 0
             self.is_full = True
-        else:
+        else: # Need to wrap around
             self.is_full = True
             cram = self.max_samples-self.idx
             self.cache[self.idx:, :sl] = new_data[:cram, :sl]
@@ -117,7 +112,7 @@ class DataCache(torch.utils.data.Dataset):
             self.idx = 0
 
     def __len__(self):
-        if self.is_full: return self.max_samples
+        if self.is_full: return self.cache.shape[0]
         return self.idx
 
     def __getitem__(self, idx):
@@ -136,10 +131,15 @@ class DataCache(torch.utils.data.Dataset):
 
     def __iter__(self):
         self.iter_idx = 0
-        endx = len(self.cache) if self.is_full else self.idx
-        return DataIterable(
-            self.cache.clone(), endx=endx, batch_size=self.batch_size
-        )
+        if self.is_full:
+            iterable = DataIterable(
+                self.cache.clone(), batch_size=self.batch_size
+            )
+        else:
+            iterable = DataIterable(
+                self.cache[:self.idx].clone(), batch_size=self.batch_size
+            )
+        return iterable
 
 class Tokenizer:
     @staticmethod
@@ -295,7 +295,7 @@ class Tokenizer:
         """
         return self.idxs_to_strs(idxs)
 
-    def str_to_idxs(self,
+    def strs_to_idxs(self,
                     strings,
                     as_tensor=False,
                     max_len=None,
@@ -368,7 +368,10 @@ class Tokenizer:
                 a list of the integer indices of each token in the
                 argued strings
         """
-        return self.str_to_idxs(
+        # I'll allow it
+        if type(strings)==type(torch.zeros(0)):
+            return self.idxs_to_strs( strings )
+        return self.strs_to_idxs(
             strings,
             as_tensor=as_tensor,
             max_len=max_len,
@@ -413,7 +416,7 @@ def sample_data(math_env,
         )
         probs.append(prob)
         soln = ProbGen.find_soln(prob)
-        solns.append(soln)
+        solns.append(tokenizer.sep+soln)
 
     probs = tokenizer(probs,
         as_tensor=True,

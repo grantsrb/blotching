@@ -283,7 +283,7 @@ class ProbGen:
                             if statement not in statement_set:
                                 statement_set.add(statement)
                                 statements.append(statement)
-        return "=" + "=".join(statements[1:])
+        return "=".join(statements[1:])
 
     @staticmethod
     def frag_ent(ent, mag):
