@@ -405,11 +405,13 @@ def sample_data(math_env,
         solns: torch LongTensor (n_samples, max_len-probs.shape[1])
     """
     plen = (len(str(math_env.max_num))+1)*math_env.max_ents - 1
-    slen = max_len-plen
+    if max_len is None: slen = plen 
+    else: slen = max_len-plen
     assert slen>0, "Needs larger max_len!"
 
     probs = []
     solns = []
+    max_soln_len = 0
     for i in range(n_samples):
         prob = ProbGen.sample_prob(
             max_num=math_env.max_num,
@@ -420,7 +422,9 @@ def sample_data(math_env,
         probs.append(prob)
         soln = ProbGen.find_soln(prob)
         solns.append(tokenizer.sep+soln)
+        if len(solns[-1])>max_soln_len: max_soln_len = len(solns[-1])
 
+    if max_len is None: slen = max_soln_len
     probs = tokenizer(probs,
         as_tensor=True,
         max_len=plen,
@@ -472,6 +476,7 @@ def get_data_cache(math_env,
     )
     prob_len = probs.shape[1]
     data = torch.cat([probs, solns], dim=1)
+    if seq_len is None: seq_len = data.shape[-1]
     data_cache = DataCache(
         max_samples=max_samples,
         seq_len=seq_len,
