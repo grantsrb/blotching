@@ -47,10 +47,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     hyps["n_tokens"] = tokenizer.n_tokens
     hyps["str2idx"] = tokenizer.str2idx
 
-    model = globals()[model_string](**hyps)
-    hyps["model_parallel"] = hyps.get("model_parallel", False)
-    if not hyps["model_parallel"]: model.to(rank)
-
     # Make dataset
     if verbose and rank==0:
         print("Collecting Initial Data")
@@ -66,6 +62,13 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         max_samples=hyps["max_samples"],
         batch_size=hyps["batch_size"],
     )
+    hyps["seq_len"] = data_cache.seq_len
+    print("Using Sequence Length:", hyps["seq_len"])
+
+    model = globals()[model_string](**hyps)
+    hyps["model_parallel"] = hyps.get("model_parallel", False)
+    if not hyps["model_parallel"]: model.to(rank)
+
     if verbose and rank==0:
         print("Collecting Validation Data")
     val_samples = hyps.get("val_samples",int(0.2*hyps["max_samples"]))
@@ -373,94 +376,45 @@ def print_examples(inpt_dict, tokenizer, n_samps=5):
         print("Samp", i)
 
         targ = tokenizer.decode(targs[i])[0]
-        targ = targ.replace(tokenizer.pad, "").replace("\n","\\n")
+        targ = targ.replace("\n","\\n")
+        s = "Pad Sample: " +  targ
+        if i == 0:
+            logstr += s + "\n"
+        print(s)
+
+        targ = targ.replace(tokenizer.pad, "")
         s = "Sample: " +  targ
         if i == 0:
             logstr += s + "\n"
         print(s)
         examp["targ"] = targ
+
+        mask = ~(targs[i]==tokenizer.pad_idx)
         for k,v in preds.items():
             eos_idx = torch.argmax(
                 (v[i]==tokenizer.eos_idx).long(),
                 dim=0
             ).item()
             if eos_idx <= 0: eos_idx = len(v[i])
+
             trunc_v = v[i][:eos_idx+1]
             pred = tokenizer.decode( trunc_v )[0].replace("\n", "\\n")
-            s = k + ": " + pred
+            s = k + ": " + pred.replace(tokenizer.pad, "")
             if i == 0:
                 logstr += s + "\n"
             print(s)
+
+            trunc_v = v[i][mask]
+            pred = tokenizer.decode( trunc_v )[0].replace("\n", "\\n")
+            s = "MaskPad"+k + ": " + pred
+            if i == 0:
+                logstr += s + "\n"
+            print(s)
+
             examp[k] = pred
         print()
         examples.append(examp)
     return examples, logstr
-
-def get_baselines(model, data, hyps, rank=0, tforce=True,
-                                             to_cpu=True,
-                                             calc_high=True):
-    """
-    Args:
-        model: SentenceAutoEncoder
-        data: dict {str: tensor}
-            input_ids: tensor
-            attention_mask: tensor
-        hyps: dict
-        rank: int
-        tforce: bool
-        to_cpu: bool
-            if true, returns tensors on cpu
-        calc_high: bool
-            if true, calculates the high preds. otherwise returns None
-            for high_preds
-
-    Returns:
-        low_preds: torch tensor (B,S,L)
-            logits predicted with minimal token seed (i.e. almost no
-            token context from cmp sequence)
-        high_preds: torch tensor (B,S,L)
-            logits predicted with maximal token seed (i.e. complete
-            token context from cmp sequence)
-            returns tensor of zeros if calc_high is false
-    """
-    with torch.no_grad():
-        low_inpts = {
-            "input_ids": data["output_ids"],
-            "attention_mask": data["output_attn_mask"],
-        }
-        if not hyps["model_parallel"]:
-            low_inpts = {k: v.to(rank) for k,v in low_inpts.items()}
-        low_preds =  model.causal_lm(
-            **low_inpts,
-            tforce=tforce,
-            ret_logits=False,
-            seed_len=max(3,hyps["seq_overlap"])
-        )
-
-        if calc_high:
-            high_inpts = {
-                "input_ids": torch.cat([
-                    data["input_ids"], data["output_ids"]
-                ], dim=1),
-                "attention_mask": torch.cat([
-                    data["attention_mask"], data["output_attn_mask"]
-                ], dim=1)
-            }
-            if not hyps["model_parallel"]:
-                high_inpts = {k: v.to(rank) for k,v in high_inpts.items()}
-            seed_len=data["input_ids"].shape[1]+max(0,hyps["seq_overlap"])
-            high_preds = model.causal_lm(
-                **high_inpts,
-                tforce=tforce,
-                ret_logits=False,
-                seed_len=seed_len
-            )
-            high_preds = high_preds[:,data["input_ids"].shape[1]:]
-        else: high_preds = torch.zeros(1,1,1)
-    if to_cpu:
-        low_preds = low_preds.cpu()
-        high_preds = high_preds.cpu()
-    return low_preds, high_preds
 
 def save_training_log(hyps, logstr, fname="training_log.txt", reset=False):
     """
