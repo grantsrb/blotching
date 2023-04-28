@@ -198,19 +198,21 @@ class TransformerModel(Model):
                 the number of prediction steps if not using teacher
                 forcing
         Returns:
-            output Tensor of shape ``[bsize, seq_len+n_steps-1, n_tokens]``
+            output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
         """
 
         embs = self.embeddings(src)
         B,S,E = embs.shape
+        n_loops = n_steps + 1
+
         pad_mask = torch.nn.functional.pad(
-            pad_mask, (0, n_steps), value=False
+            pad_mask, (0, n_loops), value=False
         )
         embs = torch.nn.functional.pad(
-            embs, (0,0,0,n_steps), value=0
+            embs, (0,0,0,n_loops), value=0
         )
         preds = torch.zeros(
-            (B,S+n_steps-1,self.n_tokens),
+            (B,S+n_steps,self.n_tokens),
             device=embs.get_device()
         )
         preds[:,:S-1].scatter_(
@@ -227,7 +229,7 @@ class TransformerModel(Model):
             mask = temp|mask
             mask = mask.to(self.get_device())
 
-        for step in range(n_steps):
+        for step in range(n_loops):
             temp = self.pos_encoder(embs[:,:S+step])
             output = self.transformer_encoder(
                 temp,
@@ -236,7 +238,7 @@ class TransformerModel(Model):
             )
             pred = self.decoder(output[:,-1])
             preds[:,S-1+step] = pred
-            if step < n_steps-1:
+            if step < n_steps:
                 argmaxs = torch.argmax(pred, dim=-1)
                 embs[:,S+step] = self.embeddings(argmaxs)
         return preds
@@ -402,14 +404,41 @@ class LossWrapper(torch.nn.Module):
                 prob_len = torch.argmax(data["input_ids"][0]==s,dim=-1)
             # +1 to include intial equals sign in seed sequence
             plen = prob_len + 1
-            inpts = data["input_ids"][...,:plen]
+            tot_len = data["output_ids"].shape[-1]
             preds = self.model(
-                inpts,
+                data["input_ids"][...,:plen],
                 pad_mask=inpt_pad_mask[..., :plen],
                 is_causal=True,
                 tforce=tforce,
-                n_steps=self.hyps["seq_len"]-plen
+                n_steps=tot_len-plen
             )
+            #print("preds:", preds.shape)
+            #print("Sep:", self.tokenizer.sep_idx)
+            #print("eqls:", self.tokenizer.sep_idx)
+            #print("inpt:", data["input_ids"].shape)
+            #print(
+            #    "input:",
+            #    data["input_ids"][0,:plen][~inpt_pad_mask[0,:plen]]
+            #)
+            #out_ids = data["output_ids"]
+            #print(
+            #    "output:",
+            #    out_ids[0,prob_len:][~out_pad_mask[0,prob_len:]]
+            #)
+
+            #print(
+            #    "input:",
+            #    self.tokenizer.decode(
+            #        data["input_ids"][0,:plen][~inpt_pad_mask[0,:plen]]
+            #    )
+            #)
+            #print(
+            #    "output:",
+            #    self.tokenizer.decode(
+            #        out_ids[0,prob_len:][~out_pad_mask[0,prob_len:]]
+            #    )
+            #)
+            #assert False
 
         if not incl_intl_prob:
             if prob_len is None:
@@ -423,7 +452,7 @@ class LossWrapper(torch.nn.Module):
         out_mask =  ~out_pad_mask.reshape(-1)
         ps = preds.reshape(-1, preds.shape[-1])[inpt_mask]
         labels = out_ids.reshape(-1)[out_mask]
-        loss=self.loss_fxn(ps,labels)*self.loss_scale
+        loss = self.loss_fxn(ps,labels)*self.loss_scale
         argmax = torch.argmax(ps, dim=-1)
         acc = (argmax==labels).float().mean()
         ret_dict["loss"] = loss
@@ -433,6 +462,8 @@ class LossWrapper(torch.nn.Module):
 
         if ret_preds:
             ret_dict["preds"] = preds.argmax(-1)
+            # Replace predictions with ground truth if not training on
+            # initial prob
             if not incl_intl_prob and tforce:
                 ids = data["output_ids"][...,:prob_len]
                 ret_dict["preds"][...,:prob_len] = ids
