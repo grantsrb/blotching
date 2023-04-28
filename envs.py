@@ -247,10 +247,14 @@ class ProbGen:
                             if statement not in statement_set:
                                 statement_set.add(statement)
                                 statements.append(statement)
+        #print("Through decomp")
+        #print("=".join(statements))
+        #print("Beginning Summation")
 
         # Progressively sum each magnitude
         for mag in range(1,max_mag+1):
             if mag in ent_dict:
+                #print("Beginning mag", mag)
                 while len(ent_dict[mag]) > 1:
                     ent1 = ent_dict[mag].popleft()
                     ent2 = ent_dict[mag].popleft()
@@ -263,16 +267,24 @@ class ProbGen:
                         statements.append(statement)
 
                     # Decompose if remaining values of mag magnitude
-                    if len(ent) != mag and len(ent_dict[mag])>0:
+                    if len(ent) != mag and len(ent_dict[mag])>0 and\
+                                                    ent[-mag] != "0":
+                        #print("Inside if")
+                        #print("ent:", ent)
+                        #print("mag:", mag)
+                        #print("entmag-1:", ent[mag-1])
+                        #print("len ent dict:", len(ent_dict[mag]))
                         ent_dict[len(ent)].popleft()
                         frag, ent = ProbGen.frag_ent(ent, mag)
                         ent_dict[mag].appendleft(frag)
                         ent_dict[mag+1].appendleft(ent)
-                    statement = ProbGen.make_statement(ent_dict)
-                    if statement not in statement_set:
-                        statement_set.add(statement)
-                        statements.append(statement)
+
+                        statement = ProbGen.make_statement(ent_dict)
+                        if statement not in statement_set:
+                            statement_set.add(statement)
+                            statements.append(statement)
                 if len(ent_dict[mag])==1:
+                    #print("inside final loop", mag, statements[-1])
                     ent1 = ent_dict[mag].pop()
                     for j in range(mag+1, max_mag+1):
                         if j in ent_dict and len(ent_dict[j])>0:
@@ -281,8 +293,10 @@ class ProbGen:
                             ent_dict[j].appendleft(ent)
                             statement = ProbGen.make_statement(ent_dict)
                             if statement not in statement_set:
+                                #print("adding statement", statement)
                                 statement_set.add(statement)
                                 statements.append(statement)
+                            break
         return "=".join(statements[1:])
 
     @staticmethod
@@ -290,8 +304,8 @@ class ProbGen:
         """
         Extracts the value at the argued magnitude. i.e. if the `ent` is
         '123', and the argued `mag` is 1, the returned values will be
-        '120' and '3'. if `mag` was 1, then the returned would be '103' and
-        '20'.
+        '120' and '3'. if `mag` was 2, then the returned would be '103'
+        and '20'.
     
         Args:
             ent: str
@@ -312,7 +326,7 @@ class ProbGen:
         return frag, ent
 
     @staticmethod
-    def make_statement(ent_dict, max_mag=4):
+    def make_statement(ent_dict, max_mag=None):
         """
         Args:
             sort_dict: dict of list of str
@@ -335,9 +349,9 @@ class ProbGen:
         ents = [x for x in ent_dict["mults"]]
         if max_mag is None:
             keys = set(ent_dict.keys())
-            del keys["mults"]
+            keys.remove("mults")
             max_mag = max(keys)
-        keys = np.arange(max_mag)
+        keys = np.arange(max_mag+1)
         for k in keys:
             if k in ent_dict and k != "mults": ents += ent_dict[k]
         return sum_sign.join(ents)
@@ -409,14 +423,23 @@ def eval_prob(prob):
 if __name__=="__main__":
     max_len = 0
     min_len = 100
-    for i in range(100):
+    #prob = "5+7870+2130"
+    #soln = ProbGen.find_soln(prob)
+    #print("Soln:", soln)
+    
+    for i in range(1000):
         prob = ProbGen.sample_prob(
-            max_num=20,
+            max_num=10000,
             max_ents=3,
-            p_mult=0.5,
+            p_mult=0,
             space_mults=True
         )
         soln = ProbGen.find_soln(prob)
+        if "=00" in soln:
+            print()
+            print("Found issue:")
+            print("prob:", prob)
+            print("Soln:", soln)
         try:
             if len(soln) < min_len:
                 min_len = len(soln)
@@ -424,8 +447,8 @@ if __name__=="__main__":
             elif len(soln) > max_len:
                 max_len = len(soln)
                 max_soln = soln
-            print(soln)
-            print()
+            #print(soln)
+            #print()
             gtruth = eval_prob(prob)
             splt2 = soln.split("=")[-1]
             assert gtruth == int(splt2)
@@ -436,8 +459,8 @@ if __name__=="__main__":
             assert False
     print("Min:",min_len)
     print(min_soln)
-    #print("Max:",max_len)
-    #print(max_soln)
+    print("Max:",max_len)
+    print(max_soln)
 
     #prob = ProbGen.sample_prob(
     #    max_num=20,
