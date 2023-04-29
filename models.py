@@ -469,7 +469,13 @@ class LossWrapper(torch.nn.Module):
                 ret_dict["preds"][...,:prob_len] = ids
         return ret_dict
 
-def blotch(idxs, sep_idx, blotch_p=0.4, indy_blotching=False):
+def get_blotch_mask(
+        idxs,
+        sep_idx,
+        blotch_p=0.4,
+        allow_contig=True,
+        indy_blotching=False
+    ):
     """
     Blotches out entire segments of the input based on the sep_idx. For
     example, if you had the sequence
@@ -493,6 +499,9 @@ def blotch(idxs, sep_idx, blotch_p=0.4, indy_blotching=False):
             is most likely the equals sign.
         blotch_p: float
             the probability of blotching a valid, blotchable sequence.
+        allow_contig: bool 
+            if true, will allow contiguous blotches. If false, will
+            separate blotch segments by at least one semantic step
         indy_blotching: bool
             one can make the mask such that the same blotching pattern
             is used for all tokens in a sequence, or blotching patterns
@@ -504,27 +513,32 @@ def blotch(idxs, sep_idx, blotch_p=0.4, indy_blotching=False):
         blotch_mask: torch BoolTensor (B,S,S) or (B,S)
             the shape will depend on the argument for indy_blotching.
     """
-    # TODO: use argsort for finding semantic separation coords?
-    seps = idxs==sep_idx
+    seps = (idxs==sep_idx)
     sep_coords = torch.nonzero(seps)
     if indy_blotching:
+        # Need to individually blotch along each sequence
         raise NotImplemented
         b,s = idxs.shape
         mask = torch.zeros(b,s,s,device=idxs.get_device()).bool()
         do_blotches = torch.rand(len(sep_coords), s)<blotch_p
         for i in range(len(do_blotches)-1):
-            if sep_coords[i+1][0]==sep_coords[i][0]:
+            if sep_coords[i+1][0]==sep_coords[i][0] and do_blotches[i]:
                 row,col = sep_coords[i]
                 _, stop_col = sep_coords[i+1]
-                mask[row, col:stop_col] = do_blotches[row]
+                mask[row, col:stop_col] = do_blotches[i]
     else:
         mask = torch.zeros_like(idxs).bool()
         do_blotches = torch.rand(len(sep_coords))<blotch_p
+        is_contig = False
         for i in range(len(do_blotches)-1):
-            if do_blotches[i] and sep_coords[i+1][0]==sep_coords[i][0]:
-                row,col = sep_coords[i]
-                _,stop_col = sep_coords[i]
-                mask[row, col:stop_col] = True
+            # Check that we should blotch and sep_coords is on same row
+            if sep_coords[i+1][0]==sep_coords[i][0] and do_blotches[i]:
+                if allow_contig or not is_contig:
+                    row,col = sep_coords[i]
+                    _,stop_col = sep_coords[i+1]
+                    mask[row, col:stop_col] = True
+                    is_contig = True
+            else: is_contig = False
     return mask
 
 def loss_and_acc(preds, labels, attn, loss_fxn, loss_scale=1,top_k=None):
@@ -562,4 +576,46 @@ def loss_and_acc(preds, labels, attn, loss_fxn, loss_scale=1,top_k=None):
             ps[idx], labels[idx], top_k, as_tensor=True
         )
     return ret_dict
+
+if __name__=="__main__":
+    #def blotch(idxs, sep_idx, blotch_p=0.4, indy_blotching=False):
+    sep_idx = 1
+    blotch_p = 0.25
+    n_samples = 5000
+    slen = 20
+    allow_contig = True
+
+    idxs = torch.randint(2,9, size=(4,slen))
+    idxs[:2,:-1:2] = sep_idx
+    idxs[2:,1:-1:2] = sep_idx
+    print("Idxs:", idxs)
+
+    bmask = get_blotch_mask(
+        idxs,
+        sep_idx=sep_idx,
+        blotch_p=blotch_p,
+        allow_contig=allow_contig
+    )
+    print("blotch:", bmask)
+    print("Blotched Idxs:")
+    for row in range(idxs.shape[0]):
+        print()
+        print("Unblotched:", idxs[row])
+        print("Mask:", bmask[row])
+        print("Blotched:", idxs[row][~bmask[row]])
+
+    idxs = torch.randint(2,9, size=(n_samples,slen))
+    idxs[:2,:-1:2] = sep_idx
+    idxs[2:,1:-1:2] = sep_idx
+
+    bmask = get_blotch_mask(
+        idxs,
+        sep_idx=sep_idx,
+        blotch_p=blotch_p,
+        allow_contig=allow_contig
+    )
+    print("bmask p:", bmask.float().sum()/2/(idxs==sep_idx).float().sum())
+
+
+
 
