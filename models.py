@@ -109,7 +109,9 @@ class TransformerModel(Model):
                       pad_mask:torch.Tensor=None,
                       is_causal:bool=None,
                       tforce:bool=True,
-                      n_steps:int=10):
+                      n_steps:int=10,
+                      temperature=None,
+                      *args, **kwargs):
         """
         Arguments:
             src: Tensor, shape ``[bsize, seq_len]``
@@ -124,6 +126,9 @@ class TransformerModel(Model):
             n_steps: int
                 the number of prediction steps if not using teacher
                 forcing
+            temperature: float
+                not yet implemented, but this will be a sampling
+                parameter that adjusts the stochasticity of sampling.
         Returns:
             if tforce:
               output Tensor of shape ``[bsize, seq_len, n_tokens]``
@@ -392,6 +397,15 @@ class LossWrapper(torch.nn.Module):
 
         # Need to be careful with intermediate padding
         if tforce:
+            if self.model.blotch_p>0:
+                blotch_mask = get_blotch_mask(
+                    data["input_ids"],
+                    sep_idx=self.tokenizer.sep_idx,
+                    blotch_p=self.model.blotch_p,
+                    allow_contig=self.hyps.get("contig_blotches",True),
+                )
+                inpt_pad_mask = inpt_pad_mask|blotch_mask
+                out_pad_mask[:,:-1] = out_pad_mask[:,:-1]|blotch_mask[:,1:]
             preds = self.model(
                 data["input_ids"],
                 pad_mask=inpt_pad_mask,

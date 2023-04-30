@@ -9,8 +9,8 @@ import os
 
 import ml_utils
 import datas
-from models import *
-from envs import ProbGen
+import models
+from envs import MathEnv
 
 RMB = "|<RMB>|" # Extra characters are to ensure uniqueness
 CMP = "|<CMP{}>|"
@@ -26,7 +26,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         dist.init_process_group("gloo", rank=rank, world_size=world_size)
 
     # Hyperparameters
-    model_string = hyps["model_string"]
     lr = hyps["lr"]
     l2 = hyps["l2"]
     n_epochs = hyps["n_epochs"]
@@ -36,7 +35,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     hyps["rank"] = rank
 
     # Establish math environment parameters
-    math_env = ProbGen(**hyps)
+    math_env = MathEnv(**hyps)
 
     # Make Tokenizer
     max_num = hyps.get("max_num", 20)**hyps.get("max_ents", 2)
@@ -65,9 +64,12 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     hyps["seq_len"] = data_cache.seq_len
     print("Using Sequence Length:", hyps["seq_len"])
 
-    model = globals()[model_string](**hyps)
+    model = make_model(hyps)
     hyps["model_parallel"] = hyps.get("model_parallel", False)
     if not hyps["model_parallel"]: model.to(rank)
+
+    if hyps.get("star", False):
+        collector = datas.Collector(model, hyps, tokenizer)
 
     if verbose and rank==0:
         print("Collecting Validation Data")
@@ -88,7 +90,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     # Wrap model to distribute loss calculations
     if verbose and rank==0:
         print("Wrapping Model")
-    wrapped_model = LossWrapper( model, tokenizer, hyps=hyps )
+    wrapped_model = models.LossWrapper( model, tokenizer, hyps=hyps )
     if not hyps["model_parallel"]:
         if verbose and rank==0:
             print("Putting Model On GPU")
@@ -120,6 +122,10 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     #############################################################
     if rank==0 and verbose: print("Beginning Training")
     for epoch in range(n_epochs):
+        # If enough training, asynchronously sample new data using model
+        if hyps.get("star",False) and epoch > hyps.get("pre_epochs", 3):
+            collector.dispatch_runners()
+
         epochtime = time.time()
         torch.cuda.empty_cache()
         if rank==0 and verbose:
@@ -329,10 +335,24 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 )
                 save_training_log(hyps, logstr)
             scheduler.step(val_loss)
+        if hyps.get("star",False) and epoch > hyps.get("pre_epochs", 3):
+            if rank==0 and verbose:
+                print("Awaiting Runners")
+            # await_harvest does nothing until collectors are dispatched
+            collector.await_runners()
+            new_data = collector.harvest_exp()
+            data_cache.add_data(new_data)
+            if rank==0 and verbose:
+                print("Updating Runner Models")
+            # updates the collection model with the most recent weights
+            collector.update_model(model)
         keys = list(package.keys())
         for k in keys: del package[k]
         if hyps["exp_name"]=="test" and epoch==2: break
     if hyps["multi_gpu"]: dist.destroy_process_group()
+    if hyps.get("star",False):
+        collector.terminate_procs()
+        collector.dispatch_runners()
 
 
 def print_examples(inpt_dict, tokenizer, n_samps=5):
@@ -389,7 +409,7 @@ def print_examples(inpt_dict, tokenizer, n_samps=5):
         print(s)
         examp["targ"] = targ
 
-        mask = ~(targs[i]==tokenizer.pad_idx)
+        mask = ~(inpt_dict["output_ids"][i]==tokenizer.pad_idx)
         for k,v in preds.items():
             eos_idx = torch.argmax(
                 (v[i]==tokenizer.eos_idx).long(),
@@ -432,3 +452,22 @@ def save_training_log(hyps, logstr, fname="training_log.txt", reset=False):
     mode = "w" if reset else "a"
     with open(os.path.join(hyps["save_folder"], fname),mode) as f:
         f.write(logstr)
+
+def make_model(hyps):
+    """
+    Makes the model. The model type specified in the hyperparams must
+    be imported into the global scope.
+
+    Args:
+        hyps: dict
+            dict of hyperparameters. See `README.md` for details
+    """
+    if hyps.get("max_posencs", None) is None:
+        hyps["max_posencs"] = hyps["seq_len"]*3
+    model = models.__dict__[hyps["model_type"]](**hyps)
+    init_checkpt = hyps.get( "init_checkpt", None)
+    if init_checkpt is not None and init_checkpt.strip()!="":
+        print("Initializing from checkpoint", init_checkpt)
+        checkpt = ml_utils.save_io.load_checkpoint(init_checkpt)
+        model.load_state_dict(checkpt["state_dict"])
+    return model

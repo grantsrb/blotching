@@ -42,12 +42,22 @@ then running the following command:
     "seed": int
         the random seed for all stochastic processes
 
-    "dataset": str
-        a string of the huggingface datasets dataset you would like to
-        use. Currently only support "openwebtext" and "glue"
-    "n_data_procs": int
-        the number of parallel processes to use for the initial
-        encoding of the data.
+    "init_checkpt": str or None
+        optionally start from an existing model checkpoint. this should
+        be the full path to the checkpoint that you would like to use.
+        This will not use the hyperparameters from the argued checkpt,
+        just the model weights.
+
+    "star": bool
+        if true, will use model to sample new data that is selected
+        for correctness and brevity
+    "pre_epochs": int
+        the number of epochs to wait before sampling new data
+    "n_runner_procs": int
+        the number of parallel processes to use for collecting new
+        data using the model
+    "collection_size": int
+        the number of new samples to attempt when collecting new data.
 
     "max_val_loops": int
         enforces a limit on the number of validation iterations. This
@@ -77,6 +87,22 @@ then running the following command:
         effectively contiguous dropout. It is kept to complete
         sequences, however, rather than fully random.
 
+    "d_model": int
+        the embedding and hidden state dimensionality of the model
+    "n_heads": int
+        the number of attention heads for transformer models
+    "h_mult": int
+        a multiplicative term that determines the hidden dimensionality
+        for all multilayer FFNs in the model.
+    "n_layers": int
+        the number of transformer layers or consecutive lstms used in
+        the model.
+
+    "model_type": str
+        the class name of the model architecture
+    "digit_embs": bool
+        if true, all numbers consist of individual digit embeddings.
+        false is not currently implemented.
     "posenc_type": str
         the type of positional encodings. As of now, valid arguments
         are "RandPositionalEncoding" and "SinPositionalEncoding"

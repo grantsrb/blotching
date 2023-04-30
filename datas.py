@@ -1,5 +1,8 @@
 import torch
-from envs import ProbGen
+import torch.multiprocessing as mp
+import envs
+import copy
+import numpy as np
 
 class DataIterable:
     def __init__(self, data, batch_size=128):
@@ -165,18 +168,13 @@ class Tokenizer:
         else: raise NotImplemented #Need to group digits together in tokenizer
         pad =  "P"
         null = " "
-        eos = "E"
         sep = "="# Semantic separator
-        special_tokens = {
-            pad: 0, # Padding token
-            null: 1, # Null token
-            sep:  2, # The semantic separation token
-            eos: 3, # EOS token
-            "+":  5,
-            "*":  6,
-            "/":  7,
-            "-":  8,
-        }
+        eos = "E"
+        tok_list = [
+            pad, null, sep, eos, "+", "*", "/", "-",
+        ]
+
+        special_tokens = { t:i for i,t in enumerate(tok_list) }
         str2idx={
             **special_tokens,
             **{str(i):len(special_tokens)+i for i in range(max_num)}
@@ -382,6 +380,277 @@ class Tokenizer:
             add_eos=add_eos
         )
 
+class Collector:
+    """
+    Handles the asynchronous data collection using the model.
+    """
+    def __init__(self, model, hyps, tokenizer):
+        """
+        Creates a deep copy of the model to be used asynchronously.
+
+        Arguments:
+            model: torch nn Module
+                not the losswrapper, but the transformer or lstm model
+            hyps: dict
+                max_num: int
+                    the maximum number available for sampling the initial
+                    problem
+                max_ents: int
+                    maximum entities for the starting problem. If using
+                    parentheticals, a parenthetical counts as one entity,
+                    parentheticals are recursively samples with max_ents-1
+                    max entities.
+                p_mult: float [0,1]
+                    the probability of sampling a multiplication sign for
+                    the starting problem
+                p_paren: float [0,1]
+                    the probability of sampling a parenthetical.
+                    Parentheticals are sampled the same way as the initial
+                    problem but with max entities equal to max_ents-1
+                space_mults: bool
+                    if true, will not allow more than two numbers to be
+                    multiplied together
+
+                collection_size: int
+                    the total number of new rollouts to collect
+            tokenizer: Tokenizer
+        Members:
+            shared_exp: list of torch long tensors [(N,S)]
+                a list of tensors that store data between processes.
+                There is one shared tensor for each process
+        """
+        self.hyps = hyps
+        self.n_procs = self.hyps["n_runner_procs"]
+        self.model = copy.deepcopy(model)
+        self.model.share_memory()
+        self.tokenizer = tokenizer
+        csize = self.hyps.get(
+            "collection_size",
+            hyps.get( "val_samples", int(0.1*hyps["max_samples"]) )
+        )
+        if hyps["exp_name"]=="test": csize = min(1000*self.n_procs, csize)
+        self.shared_exp = [
+            torch.zeros(
+                int(csize//self.n_procs),
+                self.hyps["seq_len"]
+            ).long() for _ in range(self.n_procs)
+        ]
+        csize = self.shared_exp[0].shape[0]*self.n_procs
+        self.hyps["collection_size"] = csize
+
+        # Create gating mechanisms
+        self.start_q = mp.Queue(self.n_procs)
+        self.stop_q = mp.Queue(self.n_procs)
+        self.terminate_q = mp.Queue(1)
+        self.terminate_q.put(0)
+
+        self.runners = []
+        for r in range(self.n_procs):
+            hyps = {**hyps, "seed": hyps["seed"]+r}
+            runner = Runner(
+                r,
+                hyps=hyps,
+                shared_exp=self.shared_exp[r],
+                tokenizer=self.tokenizer,
+                start_q=self.start_q,
+                stop_q=self.stop_q,
+                terminate_q=self.terminate_q,
+            )
+            self.runners.append(runner)
+
+        self.procs = []
+        self.init_runner_procs()
+
+    def clear_experience(self):
+        self.shared_exp.zero_()
+
+    def init_runner_procs(self):
+        """
+        Spawns the processes to actually collect the data
+        """
+        for i in range(self.n_procs):
+            proc = mp.Process(
+                target=self.runners[i].run,
+                args=(self.model,)
+            )
+            proc.start()
+            self.procs.append(proc)
+
+    def await_runners(self):
+        for i in range(self.n_procs):
+            self.stop_q.get()
+
+    def dispatch_runners(self):
+        for i in range(self.n_procs):
+            self.start_q.put(i)
+
+    def terminate_procs(self):
+        self.terminate_q.get()
+        self.terminate_q.put(1)
+        self.dispatch_runners()
+        for proc in self.procs:
+            proc.join()
+
+    def harvest_exp(self):
+        """
+        Picks out the correct data from the shared tensors and returns
+        a single tensor with all of the collected fresh data.
+
+        Returns:
+            exp: torch Tensor (N,S)
+        """
+        exp = []
+        for i,tensor in enumerate(self.shared_exp):
+            # -1 indicates the sample is wrong or long, so we ignore it
+            exp.append(tensor[(tensor[:,-1]>=0)])
+        exp = torch.cat(exp,dim=0)
+        print("New samples:", len(exp))
+        if len(exp)>0:
+            print(exp[:3,])
+        return exp
+
+    def update_model(self, model):
+        self.model.load_state_dict(model.state_dict())
+
+class Runner:
+    def __init__(self,
+            idx,
+            hyps,
+            shared_exp,
+            tokenizer,
+            start_q,
+            stop_q,
+            terminate_q
+        ):
+        """
+        This class handles the actual collection of the data in a
+        separate process. When it fills the shared data tensor, it
+        marks incorrect data with a -1 at the last index. Assume the
+        data is correct in the absence of the -1
+
+        Args:
+            idx: int
+                an integer id specific to this runner object
+            hyps: dict
+                the hyperparameters for the experiment
+            shared_exp: shared torch Tensor (N,S)
+            start_q: multiprocessing Queue.
+                Allows main process to control when rollouts should be
+                collected.
+            stop_q: multiprocessing Queue.
+                Used to indicate to main process that a rollout has
+                been collected.
+            phase_q: multiprocessing Queue.
+                Used to indicate from the main process that the phase
+                has changed.
+            terminate_q: multiprocessing Queue.
+                Used to indicate the end of the training from the main
+                process.
+        """
+        self.idx = idx
+        self.hyps = hyps
+        self.shared_exp = shared_exp
+        self.tokenizer = tokenizer
+        self.start_q = start_q
+        self.stop_q = stop_q
+        self.terminate_q = terminate_q
+
+    def set_random_seed(self, seed):
+        self.rand = np.random.default_rng(seed)
+
+    def run(self, model):
+        """
+        run is the entry function to begin collecting rollouts from the
+        environment. start_q indicates when to begin collecting a
+        rollout and is controlled from the main process. The stop_q is
+        used to indicate to the main process that a new rollout has
+        been collected.
+        """
+        self.set_random_seed(self.hyps["seed"])
+        self.model = model
+        self.env = envs.MathEnv(**self.hyps)
+        self.plen = (len(str(self.env.max_num))+1)*self.env.max_ents - 1
+        self.n_procs = self.hyps["n_runner_procs"]
+        n_samps = self.shared_exp.shape[0]
+        while True:
+            with torch.no_grad():
+                # Await collection signal from main proc
+                rank = self.start_q.get()
+                terminate = self.terminate_q.get()
+                self.terminate_q.put(terminate)
+                if terminate==1:
+                    del self.shared_exp
+                    del self.model
+                    print("Terminating runner")
+                    del self.start_q
+                    del self.stop_q
+                    del self.terminate_q
+                    return None
+                # Collect rollouts
+                self.rollout(model=self.model, n_samps=n_samps)
+                # Signals to main process that data has been collected
+                self.stop_q.put(rank)
+
+    def rollout(self, model, n_samps):
+        """
+        Uses the model to collect new data. Marks incorrect data with
+        a -1 at the last index
+        """
+        probs = []
+        solns = []
+        soln_vals = []
+        model.eval()
+        device = model.get_device()
+        for i in range(n_samps):
+            prob = self.env.sample()
+            probs.append(prob)
+
+            val = envs.eval_prob(prob)
+            soln_vals.append(str(val))
+
+            soln = envs.MathEnv.find_soln(prob)
+            solns.append(self.tokenizer.sep+soln)
+        inpts = self.tokenizer(
+            probs,
+            as_tensor=True,
+            max_len=self.plen+1, # Add a space for the first sep token
+            pad=True,
+            add_eos=False
+        )
+        inpts[:,-1] = self.tokenizer.sep_idx
+        pad_mask = inpts==self.tokenizer.pad_idx
+        bsize = self.hyps.get("val_batch_size", 100)
+        for i in range(0,len(inpts),bsize):
+            startx = i
+            endx = i+bsize
+            logits = model(
+                inpts[startx:endx].to(device),
+                pad_mask=pad_mask[startx:endx].to(device),
+                is_causal=True,
+                tforce=False,
+                n_steps=self.shared_exp.shape[1]-inpts.shape[1],
+                temperature=self.hyps.get("temperature", 1)
+            )
+            preds = torch.argmax(logits, dim=-1)
+            ends = torch.argmax(
+              (preds[:,inpts.shape[1]-1:]==self.tokenizer.eos_idx).long(),
+              dim=-1
+            )
+            strings = self.tokenizer.decode(preds[:,inpts.shape[1]-1:])
+            # Mark samples as incorrect if they're long or wrong
+            for i,(pred,targ) in enumerate(zip(strings, soln_vals)):
+                # Check if solution is longer than ground truth
+                if ends[i] > len(solns[i]):
+                    preds[i,-1] = -1
+                else:
+                    ans = pred.split(self.tokenizer.eos)[0]
+                    ans = ans.split(self.tokenizer.sep)[-1]
+                    # Check if final solution is incorrect
+                    if ans != targ: preds[i,-1] = -1
+                    elif ends[i]<preds.shape[1]-1:
+                        preds[i,ends[i]+1:] = self.tokenizer.pad_idx
+            self.shared_exp[startx:endx,:] = preds
+
 def sample_data(math_env,
                 tokenizer,
                 n_samples=100000,
@@ -391,7 +660,7 @@ def sample_data(math_env,
     Returns LongTensor of tokens
 
     Args:
-        math_env: ProbGen object
+        math_env: MathEnv object
             this is the math problem generator object
         tokenizer: Tokenizer object
             if None, this function will create and return a tokenizer
@@ -413,14 +682,14 @@ def sample_data(math_env,
     solns = []
     max_soln_len = 0
     for i in range(n_samples):
-        prob = ProbGen.sample_prob(
+        prob = envs.MathEnv.sample_prob(
             max_num=math_env.max_num,
             max_ents=math_env.max_ents,
             p_mult=math_env.p_mult,
             space_mults=math_env.space_mults
         )
         probs.append(prob)
-        soln = ProbGen.find_soln(prob)
+        soln = envs.MathEnv.find_soln(prob)
         solns.append(tokenizer.sep+soln)
         if len(solns[-1])>max_soln_len: max_soln_len = len(solns[-1])
 
@@ -450,7 +719,7 @@ def get_data_cache(math_env,
     Creates an initial data_cache for storing and providing data.
 
     Args:
-        math_env: ProbGen object
+        math_env: MathEnv object
             this is the math problem generator object
         tokenizer: Tokenizer object
             if None, this function will create and return a tokenizer

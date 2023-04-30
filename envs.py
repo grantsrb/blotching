@@ -4,7 +4,7 @@ import collections
 mult_sign = "*"
 sum_sign = "+"
 
-class ProbGen:
+class MathEnv:
     """
     This class samples arithmetic problems and generates their
     solutions as a series of steps following PEMDAS. The breakdown of
@@ -86,6 +86,18 @@ class ProbGen:
         self.p_paren = p_paren
         self.space_mults = space_mults
         assert p_paren==0, "Parentheses are not yet implemented"
+
+    def sample(self):
+        """
+        Samples a problem using the parameters specific to self
+        """
+        return MathEnv.sample_prob(
+            max_num=self.max_num,
+            max_ents=self.max_ents,
+            p_mult=self.p_mult,
+            space_mults=self.space_mults,
+            p_paren=self.p_paren
+        )
 
     @staticmethod
     def sample_prob(max_num, max_ents=2, p_mult=0, space_mults=True,
@@ -192,8 +204,8 @@ class ProbGen:
         statements = [prob]
         statement_set = set(statements)
         ents = statements[-1].split(sum_sign)
-        ent_dict = ProbGen.get_ent_dict(ents)
-        statement = ProbGen.make_statement(ent_dict)
+        ent_dict = MathEnv.get_ent_dict(ents)
+        statement = MathEnv.make_statement(ent_dict)
         if statement not in statement_set:
             statement_set.add(statement)
             statements.append(statement)
@@ -223,7 +235,7 @@ class ProbGen:
                     ent_dict[len(mult[-1])].appendleft(mult[-1])
                 mult = mult_sign.join([str(x) for x in ints])
                 ent_dict["mults"].appendleft(mult)
-            statement = ProbGen.make_statement(ent_dict)
+            statement = MathEnv.make_statement(ent_dict)
             if statement not in statement_set:
                 statement_set.add(statement)
                 statements.append(statement)
@@ -240,10 +252,10 @@ class ProbGen:
                         if ent[-mag] != "0":
                             # Remove Fragment and add to
                             # appropriate list
-                            frag, ent = ProbGen.frag_ent(ent, mag)
+                            frag, ent = MathEnv.frag_ent(ent, mag)
                             ent_dict[mag].appendleft(frag)
                             ent_dict[j][k] = ent
-                            statement = ProbGen.make_statement(ent_dict)
+                            statement = MathEnv.make_statement(ent_dict)
                             if statement not in statement_set:
                                 statement_set.add(statement)
                                 statements.append(statement)
@@ -261,7 +273,7 @@ class ProbGen:
                     ent = str(int(ent1)+int(ent2))
                     ent_dict[len(ent)].appendleft(ent)
                     # Record raw sum
-                    statement = ProbGen.make_statement(ent_dict)
+                    statement = MathEnv.make_statement(ent_dict)
                     if statement not in statement_set:
                         statement_set.add(statement)
                         statements.append(statement)
@@ -275,11 +287,11 @@ class ProbGen:
                         #print("entmag-1:", ent[mag-1])
                         #print("len ent dict:", len(ent_dict[mag]))
                         ent_dict[len(ent)].popleft()
-                        frag, ent = ProbGen.frag_ent(ent, mag)
+                        frag, ent = MathEnv.frag_ent(ent, mag)
                         ent_dict[mag].appendleft(frag)
                         ent_dict[mag+1].appendleft(ent)
 
-                        statement = ProbGen.make_statement(ent_dict)
+                        statement = MathEnv.make_statement(ent_dict)
                         if statement not in statement_set:
                             statement_set.add(statement)
                             statements.append(statement)
@@ -291,7 +303,7 @@ class ProbGen:
                             ent2 = ent_dict[j].popleft()
                             ent = str(int(ent1)+int(ent2))
                             ent_dict[j].appendleft(ent)
-                            statement = ProbGen.make_statement(ent_dict)
+                            statement = MathEnv.make_statement(ent_dict)
                             if statement not in statement_set:
                                 #print("adding statement", statement)
                                 statement_set.add(statement)
@@ -383,7 +395,7 @@ class ProbGen:
         for ent in ents:
             # TODO: Parentheticals are not yet implemented
             if mult_sign in ent:
-                ent = ProbGen.sort_mult(ent)
+                ent = MathEnv.sort_mult(ent)
                 sort_dict["mults"].append(ent)
             else:
                 sort_dict[len(ent)].append(ent)
@@ -424,17 +436,17 @@ if __name__=="__main__":
     max_len = 0
     min_len = 100
     #prob = "5+7870+2130"
-    #soln = ProbGen.find_soln(prob)
+    #soln = MathEnv.find_soln(prob)
     #print("Soln:", soln)
     
     for i in range(1000):
-        prob = ProbGen.sample_prob(
+        prob = MathEnv.sample_prob(
             max_num=10000,
             max_ents=3,
             p_mult=0,
             space_mults=True
         )
-        soln = ProbGen.find_soln(prob)
+        soln = MathEnv.find_soln(prob)
         if "=00" in soln:
             print()
             print("Found issue:")
@@ -462,12 +474,12 @@ if __name__=="__main__":
     print("Max:",max_len)
     print(max_soln)
 
-    #prob = ProbGen.sample_prob(
+    #prob = MathEnv.sample_prob(
     #    max_num=20,
     #    max_ents=3,
     #    p_mult=0
     #)
-    #soln = ProbGen.find_soln(prob)
+    #soln = MathEnv.find_soln(prob)
     #print("Soln:", soln)
     #splt = [int(x) for x in prob.split("+")]
     #splt2 = soln.split("=")[-1]
