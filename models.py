@@ -488,6 +488,14 @@ class LossWrapper(torch.nn.Module):
             inpt_pad_mask[...,:prob_len] = True
             out_pad_mask [...,:prob_len] = True
 
+        #print("dropped inpt:",
+        #  self.tokenizer.decode(data["input_ids"][0][inpt_pad_mask[0]]))
+        #print("dropped out:",
+        #  self.tokenizer.decode(data["output_ids"][0][out_pad_mask[0]]))
+        #print("post inpt:",
+        #  self.tokenizer.decode(data["input_ids"][0][~inpt_pad_mask[0]]))
+        #print("post out:",
+        #  self.tokenizer.decode(data["output_ids"][0][~out_pad_mask[0]]))
         out_ids = data["output_ids"]
         inpt_mask = ~inpt_pad_mask.reshape(-1)
         out_mask =  ~out_pad_mask.reshape(-1)
@@ -577,7 +585,7 @@ def get_blotch_mask(
                 if allow_contig or not is_contig:
                     row,col = sep_coords[i]
                     _,stop_col = sep_coords[i+1]
-                    mask[row, col:stop_col] = True
+                    mask[row, col+1:stop_col+1] = True
                     is_contig = True
             else: is_contig = False
     return mask
