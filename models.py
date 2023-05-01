@@ -279,6 +279,33 @@ class RandPositionalEncoding(nn.Module):
         x = x + self.dropout(self.pe[torch.sort(perm).values.long()])
         return x
 
+class RandSinPositionalEncoding(nn.Module):
+    def __init__(self,
+                 d_model:int,
+                 dropout:float=0.1,
+                 max_len:int=1000,
+                 learnable:bool=False):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        position = torch.arange(max_len).unsqueeze(1)
+        scale = (-math.log(10000.0) / d_model)
+        div_term = torch.exp(torch.arange(0, d_model, 2) * scale)
+        pe = torch.zeros(max_len, d_model)
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        if learnable: self.pe = torch.nn.Parameter(pe)
+        else: self.register_buffer('pe', pe)
+
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+        """
+        perm = torch.randperm(self.pe.shape[0]).long()[:x.size(1)]
+        x = x + self.dropout(self.pe[torch.sort(perm).values.long()])
+        return x
+
 class SinPositionalEncoding(nn.Module):
     def __init__(self,
                  d_model:int,
