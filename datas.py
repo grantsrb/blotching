@@ -505,8 +505,6 @@ class Collector:
             exp.append(tensor[(tensor[:,-1]>=0)])
         exp = torch.cat(exp,dim=0)
         print("New samples:", len(exp))
-        if len(exp)>0:
-            print(exp[:3,])
         return exp
 
     def update_model(self, model):
@@ -620,6 +618,7 @@ class Runner:
         inpts[:,-1] = self.tokenizer.sep_idx
         pad_mask = inpts==self.tokenizer.pad_idx
         bsize = self.hyps.get("val_batch_size", 100)
+        base_size = inpts.shape[1]-1 # Subtract 1 because it's the = sign
         for i in range(0,len(inpts),bsize):
             startx = i
             endx = i+bsize
@@ -633,14 +632,14 @@ class Runner:
             )
             preds = torch.argmax(logits, dim=-1)
             ends = torch.argmax(
-              (preds[:,inpts.shape[1]-1:]==self.tokenizer.eos_idx).long(),
+              (preds[:,base_size:]==self.tokenizer.eos_idx).long(),
               dim=-1
             )
-            strings = self.tokenizer.decode(preds[:,inpts.shape[1]-1:])
+            strings = self.tokenizer.decode(preds[:,base_size:])
             # Mark samples as incorrect if they're long or wrong
             for i,(pred,targ) in enumerate(zip(strings, soln_vals)):
                 # Check if solution is longer than ground truth
-                if ends[i] > len(solns[i]):
+                if ends[i] >= len(solns[i]):
                     preds[i,-1] = -1
                 else:
                     ans = pred.split(self.tokenizer.eos)[0]
@@ -648,7 +647,8 @@ class Runner:
                     # Check if final solution is incorrect
                     if ans != targ: preds[i,-1] = -1
                     elif ends[i]<preds.shape[1]-1:
-                        preds[i,ends[i]+1:] = self.tokenizer.pad_idx
+                        idx = base_size+ends[i]+1
+                        preds[i,idx:] = self.tokenizer.pad_idx
             self.shared_exp[startx:endx,:] = preds
 
 def sample_data(math_env,
