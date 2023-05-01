@@ -124,6 +124,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     for epoch in range(n_epochs):
         # If enough training, asynchronously sample new data using model
         if hyps.get("star",False) and epoch > hyps.get("pre_epochs", 3):
+            if rank==0 and verbose: print("Dispatching Runners")
             collector.dispatch_runners()
 
         epochtime = time.time()
@@ -236,6 +237,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         #############################################################
         avg_loss = 0
         avg_acc = 0
+        avg_correct = 0
         if rank==0 and epoch%val_mod==0:
             ddp_model.eval()
             if verbose:
@@ -261,6 +263,13 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     acc = package["acc"]
                     preds = package["preds"]
 
+                    corrects = check_correct(
+                        tokenizer,
+                        data["output_ids"],
+                        preds,
+                    )
+                    avg_correct += corrects.mean().item()
+
                     avg_loss += loss.item()
                     avg_acc += acc.item()
                     if hyps["exp_name"]=="test" and i>=3: break
@@ -272,6 +281,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             div = (i+1)
             val_loss = round(avg_loss/div, 5)
             val_acc = round(avg_acc/div, 5)
+            val_correct = round(avg_correct/div, 5)
             if rank==0 and verbose:
                 print()
                 s = "Example Predictions On Validation"
@@ -298,9 +308,14 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 )
                 print(s)
                 logstr += s + "\n"
+
                 s = "Val Loss: {} -Val Acc: {}".format(
                     val_loss,val_acc
                 )
+                print(s)
+                logstr += s + "\n"
+
+                s = "Val Correct: {}".format( val_correct )
                 print(s)
                 logstr += s + "\n"
 
@@ -321,6 +336,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     "train_acc":  train_acc,
                     "val_loss":   val_loss,
                     "val_acc":    val_acc,
+                    "val_correct":    val_correct,
                     "state_dict": model.state_dict(),
                     "optim_dict": optimizer.state_dict(),
                     "hyps": hyps,
@@ -353,6 +369,31 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     if hyps.get("star",False):
         collector.terminate_procs()
         collector.dispatch_runners()
+
+def check_correct(tokenizer, output_ids, pred_ids):
+    """
+    Determines whether or not the outputs are correct for each row
+    of the inputs.
+
+    Arguments:
+        tokenizer: Tokenizer
+        output_ids: torch LongTensor (N,S)
+        pred_ids: torch LongTensor (N,T)
+    Returns:
+        corrects: Bool Tensor (N,)
+            True values indicate that the final output of the row was
+            correctly predicted.
+    """
+    targs = tokenizer.decode(output_ids)
+    preds = tokenizer.decode(pred_ids)
+    corrects = torch.zeros(len(preds))
+    eos = tokenizer.eos
+    sep = tokenizer.sep
+    for i,(targ,pred) in enumerate(zip(targs, preds)):
+        t = targ.split(eos)[0].split(sep)[-1]
+        p = pred.split(eos)[0].split(sep)[-1]
+        corrects[i] = t==p
+    return corrects
 
 
 def print_examples(inpt_dict, tokenizer, n_samps=5):
