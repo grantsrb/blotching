@@ -62,6 +62,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         batch_size=hyps["batch_size"],
     )
     hyps["seq_len"] = data_cache.seq_len
+    hyps["prob_len"] = data_cache.prob_len
     print("Using Sequence Length:", hyps["seq_len"])
 
     model = make_model(hyps)
@@ -74,6 +75,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     if verbose and rank==0:
         print("Collecting Validation Data")
     val_samples = hyps.get("val_samples",int(0.2*hyps["max_samples"]))
+    if hyps["exp_name"] == "test":
+        val_samples = 1100
     val_cache = datas.get_data_cache(
         math_env,
         tokenizer,
