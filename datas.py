@@ -462,7 +462,8 @@ class Collector:
         self.init_runner_procs()
 
     def clear_experience(self):
-        self.shared_exp.zero_()
+        for exp in self.shared_exp:
+            exp.zero_()
 
     def init_runner_procs(self):
         """
@@ -502,7 +503,8 @@ class Collector:
         exp = []
         for i,tensor in enumerate(self.shared_exp):
             # -1 indicates the sample is wrong or long, so we ignore it
-            exp.append(tensor[(tensor[:,-1]>=0)])
+            t = tensor.clone()
+            exp.append(t[(t[:,-1]>=0)])
         exp = torch.cat(exp,dim=0)
         print("New samples:", len(exp))
         return exp
@@ -547,6 +549,7 @@ class Runner:
         """
         self.idx = idx
         self.hyps = hyps
+        self.prob_len = self.hyps["prob_len"]
         self.shared_exp = shared_exp
         self.tokenizer = tokenizer
         self.start_q = start_q
@@ -567,7 +570,6 @@ class Runner:
         self.set_random_seed(self.hyps["seed"])
         self.model = model
         self.env = envs.MathEnv(**self.hyps)
-        self.plen = (len(str(self.env.max_num))+1)*self.env.max_ents - 1
         self.n_procs = self.hyps["n_runner_procs"]
         n_samps = self.shared_exp.shape[0]
         while True:
@@ -598,6 +600,7 @@ class Runner:
         solns = []
         soln_vals = []
         model.eval()
+        self.shared_exp.zero_()
         device = model.get_device()
         for i in range(n_samps):
             prob = self.env.sample()
@@ -611,45 +614,49 @@ class Runner:
         inpts = self.tokenizer(
             probs,
             as_tensor=True,
-            max_len=self.plen+1, # Add a space for the first sep token
+            max_len=self.prob_len+1, # Add a space for the first sep token
             pad=True,
             add_eos=False
         )
         inpts[:,-1] = self.tokenizer.sep_idx
+
         pad_mask = inpts==self.tokenizer.pad_idx
         bsize = self.hyps.get("val_batch_size", 100)
-        base_size = inpts.shape[1]-1 # Subtract 1 because it's the = sign
-        for i in range(0,len(inpts),bsize):
-            startx = i
-            endx = i+bsize
-            logits = model(
-                inpts[startx:endx].to(device),
-                pad_mask=pad_mask[startx:endx].to(device),
-                is_causal=True,
-                tforce=False,
-                n_steps=self.shared_exp.shape[1]-inpts.shape[1],
-                temperature=self.hyps.get("temperature", 1)
-            )
-            preds = torch.argmax(logits, dim=-1)
-            ends = torch.argmax(
-              (preds[:,base_size:]==self.tokenizer.eos_idx).long(),
-              dim=-1
-            )
-            strings = self.tokenizer.decode(preds[:,base_size:])
-            # Mark samples as incorrect if they're long or wrong
-            for i,(pred,targ) in enumerate(zip(strings, soln_vals)):
-                # Check if solution is longer than ground truth
-                if ends[i] >= len(solns[i]):
-                    preds[i,-1] = -1
-                else:
-                    ans = pred.split(self.tokenizer.eos)[0]
-                    ans = ans.split(self.tokenizer.sep)[-1]
-                    # Check if final solution is incorrect
-                    if ans != targ: preds[i,-1] = -1
-                    elif ends[i]<preds.shape[1]-1:
-                        idx = base_size+ends[i]+1
-                        preds[i,idx:] = self.tokenizer.pad_idx
-            self.shared_exp[startx:endx,:] = preds
+        plen = self.prob_len
+        with torch.no_grad():
+            for i in range(0,len(inpts),bsize):
+                startx = i
+                endx = i+bsize
+                logits = model(
+                    inpts[startx:endx].to(device),
+                    pad_mask=pad_mask[startx:endx].to(device),
+                    is_causal=True,
+                    tforce=False,
+                    n_steps=self.shared_exp.shape[1]-inpts.shape[1]-1,
+                    temperature=self.hyps.get("temperature", 1),
+                    incl_all_inpts=True,
+                )
+                preds = torch.argmax(logits, dim=-1)
+                preds[:,-1] = self.tokenizer.eos_idx
+                ends = torch.argmax(
+                  (preds[:,plen:]==self.tokenizer.eos_idx).long(),
+                  dim=-1
+                )
+                strings = self.tokenizer.decode(preds[:,plen:])
+                # Mark samples as incorrect if they're long or wrong
+                for i,(pred,targ) in enumerate(zip(strings, soln_vals)):
+                    # Check if solution is longer than ground truth
+                    if ends[i] >= len(solns[i]):
+                        preds[i,-1] = -1
+                    else:
+                        ans = pred.split(self.tokenizer.eos)[0]
+                        ans = ans.split(self.tokenizer.sep)[-1]
+                        # Check if final solution is incorrect
+                        if ans != targ: preds[i,-1] = -1
+                        elif plen+ends[i]+1<preds.shape[1]:
+                            idx = plen+ends[i]+1
+                            preds[i,idx:] = self.tokenizer.pad_idx
+                self.shared_exp[startx:endx,:] = preds
 
 def sample_data(math_env,
                 tokenizer,
@@ -717,6 +724,54 @@ def get_data_cache(math_env,
                    *args, **kwargs):
     """
     Creates an initial data_cache for storing and providing data.
+
+    Args:
+        math_env: MathEnv object
+            this is the math problem generator object
+        tokenizer: Tokenizer object
+            if None, this function will create and return a tokenizer
+            object
+        init_samples: int
+            the initial number of data points to sample
+        seq_len: int
+            the desired sequence lengths of the samples
+        max_samples: int or None
+            a parameter to limit the total amount of data in the cache.
+            if None, will default to init_samples
+        batch_size: int
+            the batch_size for the DataCache iterable
+    Returns:
+        data_cache: DataCache
+    """
+    if max_samples is None: max_samples = init_samples
+    probs, solns = sample_data(
+        math_env,
+        tokenizer,
+        n_samples=init_samples,
+        max_len=seq_len
+    )
+    prob_len = probs.shape[1]
+    data = torch.cat([probs, solns], dim=1)
+    if seq_len is None: seq_len = data.shape[-1]
+    data_cache = DataCache(
+        max_samples=max_samples,
+        seq_len=seq_len,
+        batch_size=batch_size,
+        init_data=data,
+        prob_len=prob_len
+    )
+    return data_cache
+
+def get_validation_set(
+        math_env,
+        tokenizer,
+        max_len=100,
+        batch_size=128,
+        *args, **kwargs
+    ):
+    """
+    Creates an validation data cache that includes problems of many
+    varieties.
 
     Args:
         math_env: MathEnv object
