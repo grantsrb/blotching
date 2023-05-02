@@ -111,6 +111,7 @@ class TransformerModel(Model):
                       tforce:bool=True,
                       n_steps:int=10,
                       temperature=None,
+                      incl_all_inpts=False,
                       *args, **kwargs):
         """
         Arguments:
@@ -129,6 +130,12 @@ class TransformerModel(Model):
             temperature: float
                 not yet implemented, but this will be a sampling
                 parameter that adjusts the stochasticity of sampling.
+            incl_all_inpts: bool
+                if true, will include all input tokens in the output
+                prediction tensor. otherwise only includes "predicted
+                spaces". Only applies if using freedom fwd. This is
+                useful to save a concatenation during the data
+                bootstrapping phase.
         Returns:
             if tforce:
               output Tensor of shape ``[bsize, seq_len, n_tokens]``
@@ -150,6 +157,7 @@ class TransformerModel(Model):
                 pad_mask=pad_mask,
                 is_causal=is_causal,
                 n_steps=n_steps,
+                incl_all_inpts=incl_all_inpts
             )
 
     def tforce_fwd(self, src:torch.Tensor,
@@ -189,7 +197,8 @@ class TransformerModel(Model):
                       mask:torch.Tensor=None,
                       pad_mask:torch.Tensor=None,
                       is_causal:bool=None,
-                      n_steps:int=10):
+                      n_steps:int=10,
+                      incl_all_inpts:bool=False):
         """
         Arguments:
             src: Tensor, shape ``[bsize, seq_len]``
@@ -202,6 +211,11 @@ class TransformerModel(Model):
             n_steps: int
                 the number of prediction steps if not using teacher
                 forcing
+            incl_all_inpts: bool
+                if true, will include all input tokens in the output
+                prediction tensor. otherwise only includes "predicted
+                spaces". This is useful to save a concatenation during
+                the data bootstrapping phase.
         Returns:
             output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
         """
@@ -217,13 +231,13 @@ class TransformerModel(Model):
             embs, (0,0,0,n_loops), value=0
         )
         preds = torch.zeros(
-            (B,S+n_steps,self.n_tokens),
+            (B,S+n_steps+incl_all_inpts,self.n_tokens),
             device=embs.get_device()
         )
-        preds[:,:S-1].scatter_(
+        preds[:,:S-1+incl_all_inpts].scatter_(
             dim=-1,
-            index=src[:, 1:S, None],
-            src=torch.ones_like(preds[:, :S-1])
+            index=src[:, 1-incl_all_inpts:S, None],
+            src=torch.ones_like(preds[:, :S-1+incl_all_inpts])
         )
         if mask is None:
             mask = generate_square_subsequent_mask(
@@ -242,7 +256,7 @@ class TransformerModel(Model):
                 src_key_padding_mask=pad_mask[:,:S+step]
             )
             pred = self.decoder(output[:,-1])
-            preds[:,S-1+step] = pred
+            preds[:,S-1+step+incl_all_inpts] = pred
             if step < n_steps:
                 argmaxs = torch.argmax(pred, dim=-1)
                 embs[:,S+step] = self.embeddings(argmaxs)
@@ -422,6 +436,27 @@ class LossWrapper(torch.nn.Module):
         inpt_pad_mask = inpt_pad_mask|(data["input_ids"]==eos_idx)
         out_pad_mask  = data["output_ids"]==pad_idx
 
+        #non_overlaps = inpt_pad_mask.sum(-1)!=out_pad_mask.sum(-1)
+        #if torch.any(non_overlaps):
+        #    idx = torch.argmax(non_overlaps.long(), axis=-1)
+        #    print("idx:", idx, "inpt:", inpt_pad_mask.sum(-1)[idx], "outp:", out_pad_mask.sum(-1)[idx])
+        #    print("early inpt:",
+        #      self.tokenizer.decode(data["input_ids"][idx]))
+        #    print("early dropped out:",
+        #      self.tokenizer.decode(data["output_ids"][idx]))
+        #    print("early dropped inpt:",
+        #      self.tokenizer.decode(data["input_ids"][idx][inpt_pad_mask[idx]]))
+        #    print("early dropped out:",
+        #      self.tokenizer.decode(data["output_ids"][idx][out_pad_mask[idx]]))
+        #    print("early post inpt:",
+        #      self.tokenizer.decode(data["input_ids"][idx][~inpt_pad_mask[idx]]))
+        #    print("early post out:",
+        #      self.tokenizer.decode(data["output_ids"][idx][~out_pad_mask[idx]]))
+        #    print("early Inpt mask sum:", inpt_pad_mask.float().sum())
+        #    print("early Out mask sum:", out_pad_mask.float().sum())
+        #else:
+        #    print("No conflicting overlaps found?")
+
         # Need to be careful with intermediate padding
         if tforce:
             if self.model.blotch_p>0:
@@ -433,6 +468,8 @@ class LossWrapper(torch.nn.Module):
                 )
                 inpt_pad_mask = inpt_pad_mask|blotch_mask
                 out_pad_mask[:,:-1] = out_pad_mask[:,:-1]|blotch_mask[:,1:]
+                #print("blotch Inpt mask sum:", inpt_pad_mask.float().sum())
+                #print("blotch Out mask sum:", out_pad_mask.float().sum())
             preds = self.model(
                 data["input_ids"],
                 pad_mask=inpt_pad_mask,
@@ -487,6 +524,8 @@ class LossWrapper(torch.nn.Module):
                 prob_len = torch.argmax(data["input_ids"][0]==s,dim=-1)
             inpt_pad_mask[...,:prob_len] = True
             out_pad_mask [...,:prob_len] = True
+            #print("intlprob Inpt mask sum:", inpt_pad_mask.float().sum())
+            #print("intlprob Out mask sum:", out_pad_mask.float().sum())
 
         #print("dropped inpt:",
         #  self.tokenizer.decode(data["input_ids"][0][inpt_pad_mask[0]]))
@@ -502,6 +541,21 @@ class LossWrapper(torch.nn.Module):
         ps = preds.reshape(-1, preds.shape[-1])[inpt_mask]
         labels = out_ids.reshape(-1)[out_mask]
         loss = self.loss_fxn(ps,labels)*self.loss_scale
+        #try:
+        #    loss = self.loss_fxn(ps,labels)*self.loss_scale
+        #except:
+        #    #print("dropped inpt:",
+        #    #  self.tokenizer.decode(data["input_ids"][0][inpt_pad_mask[0]]))
+        #    #print("dropped out:",
+        #    #  self.tokenizer.decode(data["output_ids"][0][out_pad_mask[0]]))
+        #    #print("post inpt:",
+        #    #  self.tokenizer.decode(data["input_ids"][0][~inpt_pad_mask[0]]))
+        #    #print("post out:",
+        #    #  self.tokenizer.decode(data["output_ids"][0][~out_pad_mask[0]]))
+        #    print("Inpt mask sum:", inpt_pad_mask.float().sum())
+        #    print("Out mask sum:", out_pad_mask.float().sum())
+        #    #print("post pred:",
+        #    #  self.tokenizer.decode(preds.argmax(-1)[0][~inpt_pad_mask[0]]))
         argmax = torch.argmax(ps, dim=-1)
         acc = (argmax==labels).float().mean()
         ret_dict["loss"] = loss
