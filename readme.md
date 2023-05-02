@@ -86,6 +86,9 @@ then running the following command:
         the blotch probability. 0 means no blotching. blotching is
         effectively contiguous dropout. It is kept to complete
         sequences, however, rather than fully random.
+    "contig_blotches": bool
+        if true, will allow contiguous blotches. If false, will
+        separate blotch segments by at least one semantic step
 
     "d_model": int
         the embedding and hidden state dimensionality of the model
