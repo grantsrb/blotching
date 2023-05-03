@@ -70,6 +70,7 @@ class Model(torch.nn.Module):
         self.posenc_drop_p = posenc_drop_p
         if self.posenc_drop_p is None: self.posenc_drop_p = drop_p
         self.learn_posencs = learn_posencs
+        self.pad_pos_skip = pad_pos_skip
 
     def get_device(self):
         return next(self.parameters()).get_device()
@@ -84,7 +85,8 @@ class TransformerModel(Model):
             posenc_drop_p=self.posenc_drop_p,
             drop_p=self.drop_p,
             max_len=self.max_posencs,
-            learnable=self.learn_posencs
+            learnable=self.learn_posencs,
+            pad_pos_skip=self.pad_pos_skip
         )
         d_hid = self.h_mult*self.d_model
         encoder_layer = torch.nn.TransformerEncoderLayer(
@@ -117,7 +119,6 @@ class TransformerModel(Model):
                       n_steps:int=10,
                       temperature=None,
                       incl_all_inpts=False,
-                      pad_pos_skip=False,
                       *args, **kwargs):
         """
         Arguments:
@@ -157,8 +158,7 @@ class TransformerModel(Model):
                 src=src,
                 mask=mask,
                 pad_mask=pad_mask,
-                is_causal=is_causal,
-                pad_pos_skip=pad_pos_skip
+                is_causal=is_causal
             )
         else:
             return self.freedom_fwd(
@@ -167,15 +167,13 @@ class TransformerModel(Model):
                 pad_mask=pad_mask,
                 is_causal=is_causal,
                 n_steps=n_steps,
-                incl_all_inpts=incl_all_inpts,
-                pad_pos_skip=pad_pos_skip
+                incl_all_inpts=incl_all_inpts
             )
 
     def tforce_fwd(self, src:torch.Tensor,
                       mask:torch.Tensor=None,
                       pad_mask:torch.Tensor=None,
-                      is_causal:bool=None,
-                      pad_pos_skip:bool=False):
+                      is_causal:bool=None):
         """
         Arguments:
             src: Tensor, shape ``[bsize, seq_len]``
@@ -185,9 +183,6 @@ class TransformerModel(Model):
                 If specified, applies a causal mask as mask (optional)
                 and ignores attn_mask for computing scaled dot product
                 attention.
-            pad_pos_skip: bool
-                if true, will skip over tokens when applying positional
-                encodings based on the pad mask.
         Returns:
             output Tensor of shape ``[bsize, seq_len, n_tokens]``
         """
@@ -200,10 +195,7 @@ class TransformerModel(Model):
             temp = generate_square_subsequent_mask(embs.shape[1])
             mask = temp|mask
             mask = mask.to(self.get_device())
-        embs = self.pos_encoder(
-            embs,
-            pad_mask=pad_mask if pad_pos_skip else None
-        )
+        embs = self.pos_encoder( embs, mask=pad_mask )
         output = self.transformer_encoder(
             embs,
             mask=mask,
@@ -273,8 +265,7 @@ class TransformerModel(Model):
 
         for step in range(n_loops):
             temp = self.pos_encoder(
-                embs[:,:S+step],
-                pad_mask=pad_mask if pad_pos_skip else None
+                embs[:,:S+step], mask=pad_mask[:,:S+step]
             )
             output = self.transformer_encoder(
                 temp,
@@ -329,6 +320,7 @@ class PositionalEncoding(nn.Module):
             mask: Tensor, shape ``[batch_size, seq_len]``
                 pad mask. true values represent padding/blotching
         """
+        if mask is None: return self.rand_forward(x)
         # pe: N, E
         n = np.random.randint(x.size(1), self.pe.shape[0]+1)
         idxs = torch.sort(torch.randperm(n)[:x.size(1)]).values.long()
@@ -345,16 +337,25 @@ class PositionalEncoding(nn.Module):
     def vanil_forward(self, x: Tensor, *args, **kwargs) -> Tensor:
         """
         Arguments:
-            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
         """
         x = self.dropout( x + self.posenc_dropout(self.pe[:x.size(1)]) )
         return x
 
-    def skip_vanil_forward(self, x: Tensor, *args, **kwargs) -> Tensor:
+    def skip_vanil_forward(
+            self,
+            x: Tensor,
+            mask: Tensor,
+            *args,
+            **kwargs
+        ) -> Tensor:
         """
         Arguments:
-            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
+            mask: Tensor, shape ``[batch_size, seq_len]``
+                pad mask. true values represent padding/blotching
         """
+        if mask is None: return self.vanil_forward(x)
         pe = self.posenc_dropout(self.pe[:x.size(1)])
 
         sums = (~mask).float().sum(-1)
