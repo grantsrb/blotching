@@ -504,9 +504,13 @@ class Collector:
         for i,tensor in enumerate(self.shared_exp):
             # -1 indicates the sample is wrong or long, so we ignore it
             t = tensor.clone()
+            if self.hyps["exp_name"]=="test": # add some data if testing
+                t[t==self.tokenizer.eos_idx] = self.tokenizer.pad_idx
+                t[:5,-2] = self.tokenizer.eos_idx
+                t[:5,-1] = self.tokenizer.pad_idx
+                t[5:,-1] = -1
             exp.append(t[(t[:,-1]>=0)])
         exp = torch.cat(exp,dim=0)
-        print("New samples:", len(exp))
         return exp
 
     def update_model(self, model):

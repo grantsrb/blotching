@@ -49,7 +49,9 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     # Make dataset
     if verbose and rank==0:
         print("Collecting Initial Data")
-    if hyps["exp_name"]=="test": hyps["max_samples"] = 1000
+    if hyps["exp_name"]=="test":
+        hyps["max_samples"] = 1000
+        hyps["pre_epochs"] = 0
     hyps["init_samples"] = hyps.get(
         "init_samples", hyps.get("max_samples",1000000)
     )
@@ -360,6 +362,16 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             # await_harvest does nothing until collectors are dispatched
             collector.await_runners()
             new_data = collector.harvest_exp()
+            if rank==0 and verbose:
+                try:
+                    print("New samples:", len(new_data))
+                    print("Examples:")
+                    examps = tokenizer.decode(new_data[:5])
+                    for e,ex in enumerate(examps):
+                        print(e,"-",ex)
+                except Exception as e:
+                    print(e)
+                    print("Issue viewing new samples")
             data_cache.add_data(new_data)
             if rank==0 and verbose:
                 print("Updating Runner Models")
