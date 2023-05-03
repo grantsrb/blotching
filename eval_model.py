@@ -28,348 +28,160 @@ from tqdm import tqdm
 import sys
 import os
 
-from ml_utils.utils import try_key
 import ml_utils.save_io as io
 import datas
 from models import *
-from training import print_examples
-
-def get_metrics(hyps, model, inpts, loss_fxn, seed_len=3, tforce=True,
-                                                          top_k=5):
-    """
-    Calculates the loss and accuracy using causal language modeling
-
-    Args:
-        hyps: dict
-        model: SentenceAutoEncoder
-        inpts: dict {str: tensor}
-            "input_ids": tensor (B,S)
-            "attention_mask": tensor (B,S)
-                this is a padding mask. 1's mean non-padded input. 0's
-                mean token is padding
-        loss_fxn: torch loss function
-        tforce: bool
-            if true, predictions are teacher forced
-        top_k: int optional
-            if argued, returns a calculation of the top_k accuracy
-    """
-    # Make predictions
-    preds, logits = model.causal_lm(
-      **inpts, tforce=tforce, ret_logits=True, seed_len=seed_len
-    )
-    logits = logits[:, seed_len:]
-    # Calculate loss
-    landa = loss_and_acc(
-        logits, inpts["input_ids"][:,seed_len+1:],
-        attn=inpts["attention_mask"][:,seed_len+1:],
-        loss_fxn=loss_fxn,
-        loss_scale=1,
-        top_k=top_k
-    )
-    return landa
+import envs
 
 if __name__=="__main__":
     rank = 0
     verbose = True
     results_file = "model_results.csv"
     abbrev_len = 1000
-    untrained = False # Detemines if model should load saved checkpt
     bsize = None # Determines batch size of evaluation
+    overwrite = False
 
-    path = sys.argv[1]
+    model_folders = []
     for arg in sys.argv[1:]:
-        if arg=="untrained": untrained = True
-        elif io.is_model_folder(arg): path = arg
+        if os.path.exists(arg):
+            if io.is_model_folder(arg):
+                model_folders.append(arg)
+            else:
+                model_folders += io.get_model_folders(
+                    arg,incl_full_path=True
+                )
+        elif "overwrite" in arg:
+            overwrite = True
         else:
             try:
                 bsize = int(arg)
             except:
                 print("Unrecognized arg", arg)
-    checkpt = io.load_checkpoint(path)
-    hyps = checkpt["hyps"]
-    if abbrev_len is not None: hyps["abbrev_len"] = abbrev_len
-    hyps["results_file"] = results_file
-    hyps["seed"] = hyps.get("seed", int(time.time()))
-    if hyps["seed"] is None: hyps["seed"] = int(time.time())
-    torch.manual_seed(hyps["seed"])
-    hyps["loss_scale"] = 1./hyps["n_grad_loops"]
-    hyps["csl_task"] = False # CSL is handled by high_loss and high_acc
-    if bsize is not None:
-        hyps["batch_size"] = bsize
-        hyps["val_batch_size"] = bsize
-
-    # Make Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(hyps["model_string"])
-    tokenizer.truncation_side = "right"
-
-    # Add important tokens
-    num_added = 0
-    if tokenizer.pad_token is None:
-        tokenizer.add_special_tokens(
-            {"pad_token": hyps.get("pad_token", tokenizer.eos_token)}
+    if overwrite: print("Overwriting!!!")
+    for f,model_folder in enumerate(model_folders):
+        csv_path = os.path.join(model_folder, results_file)
+        if not overwrite and os.path.exists(csv_path):
+            print(csv_path, "already exists, skipping....")
+            continue
+        print(
+            "Evaluating", model_folder,
+            "-- {}/{}".format(f,len(model_folders))
         )
-        if tokenizer.pad_token != tokenizer.eos_token:
-            print("PAD {} different from EOS {}".format(
-                tokenizer.pad_token, tokenizer.eos_token
-            ))
-            # Adjust Model Embeddings for new token types
-            model.add_embeddings(1)
+        checkpt = io.load_checkpoint(model_folder)
+        hyps = checkpt["hyps"]
 
-    hyps["device_map"] = "auto" if hyps["model_parallel"] else None
-    model = SentenceAutoEncoder(**hyps)
-    if not untrained: model.load_state_dict(checkpt["state_dict"])
+        hyps["model_type"] = hyps["model_string"]
+        if abbrev_len is not None: hyps["abbrev_len"] = abbrev_len
+        hyps["results_file"] = results_file
+        hyps["seed"] = hyps.get("seed", int(time.time()))
+        if hyps["seed"] is None: hyps["seed"] = int(time.time())
+        torch.manual_seed(hyps["seed"])
+        hyps["loss_scale"] = 1./hyps["n_grad_loops"]
+        if bsize is not None:
+            hyps["batch_size"] = bsize
+            hyps["val_batch_size"] = bsize
 
-    # Wrap model and place on gpu
-    wrapped_model = LossWrapper( model, tokenizer, hyps=hyps )
-    if not hyps["model_parallel"]:
-        wrapped_model.to(rank)
+        # Establish math environment parameters
+        math_env = envs.MathEnv(**hyps)
 
-    # Make dataset
-    if verbose and rank==0:
-        print("Collecting Data", hyps["dataset"], hyps["abbrev_len"])
+        # Make Tokenizer
+        tokenizer = datas.Tokenizer.get_tokenizer(**hyps)
 
-    dataset, valset, dataloader, valloader = datas.get_loaders(
-        hyps,
-        tokenizer,
-    )
-    abrv = hyps.get("abbrev_len", None)
-    if abrv is not None and abrv<100000:
-        valset = dataset
-        valloader = dataloader
+        model = io.load_model(checkpt, globals())
+        model.eval()
+        model.cuda()
 
-    loss_fxn = torch.nn.CrossEntropyLoss()
-    avgs = {
-        "tlow_loss": 0,
-        "low_loss": 0,
-        "thigh_loss": 0,
-        "high_loss": 0,
-        "tlow_acc": 0,
-        "low_acc": 0,
-        "thigh_acc": 0,
-        "high_acc": 0,
-
-        "tlow_top_k": 0,
-        "low_top_k": 0,
-        "thigh_top_k": 0,
-        "high_top_k": 0,
-
-        "tpred_loss": 0,
-        "pred_loss": 0,
-        "tpred_acc": 0,
-        "pred_acc": 0,
-
-        "trmb_loss": 0,
-        "rmb_loss": 0,
-        "trmb_acc": 0,
-        "rmb_acc": 0,
-    }
-    for i,data in tqdm(enumerate(dataloader)):
+        # Wrap model and place on gpu
+        wrapped_model = LossWrapper( model, tokenizer, hyps=hyps )
         if not hyps["model_parallel"]:
-            data = {k: v.to(rank) for k,v in data.items()}
-        with torch.no_grad():
-            wrapped_model.train()
-            model.train()
+            wrapped_model.to(rank)
 
-            # Low Training Type
-            low_inpts = {
-                "input_ids": data["output_ids"],
-                "attention_mask": data["output_attn_mask"],
-            }
-            landa = get_metrics(
-              hyps, model, low_inpts, loss_fxn,
-              tforce=True, seed_len=0
-            )
-            tlow_loss, tlow_acc = landa["loss"], landa["acc"]
-            avgs["tlow_loss"] += tlow_loss.item()*hyps["loss_scale"]
-            avgs["tlow_acc"] += tlow_acc.item()
-            avgs["tlow_top_k"] += landa["top_k"].item()
+        # Make dataset
+        if verbose and rank==0: print("Collecting Data")
+        data_cache = datas.get_validation_set(
+            math_env,
+            tokenizer,
+            max_len=None,
+            batch_size=hyps["val_batch_size"]
+        )
+        if verbose and rank==0: print("Total Samples:", len(data_cache))
 
-            # Regular Model Training Type
-            package = wrapped_model(
-                data,
-                ret_preds=True,
-                seq_len=hyps["seq_len"],
-                tforce=True,
-                gen_ids=try_key(hyps, "gen_ids", False),
-                no_grad=True
-            )
-            avgs["tpred_loss"] += package["loss"].item()
-            avgs["tpred_acc"]  += package["acc"].item()
-            avgs["tpred_top_k"] += package["top_k"].item()
-            if "rmb_loss" in package:
-                avgs["trmb_loss"] += package["rmb_loss"].item()
-                avgs["trmb_acc"]  += package["rmb_acc"].item()
-                avgs["trmb_top_k"] += package["rmb_top_k"].item()
-
-            # High Train Type
-            high_inpts = {
-              "input_ids": torch.cat([
-                data["input_ids"],data["output_ids"]
-              ], dim=1),
-              "attention_mask": torch.cat([ 
-                data["attention_mask"], data["output_attn_mask"]
-              ], dim=1)
-            }
-            landa = get_metrics(
-              hyps, model, high_inpts, loss_fxn, tforce=True, seed_len=0
-            )
-            thigh_loss, thigh_acc = landa["loss"], landa["acc"]
-            avgs["thigh_loss"] += thigh_loss.item()*hyps["loss_scale"]
-            avgs["thigh_acc"] += thigh_acc.item()
-            avgs["thigh_top_k"] += landa["top_k"].item()
-
-
-            if valloader==dataloader:
-                wrapped_model.eval()
-                model.eval()
-                # Low Eval Type
-                landa = get_metrics(
-                  hyps, model, low_inpts, loss_fxn,
-                  tforce=False, seed_len=max(hyps.get("seq_overlap",1),1)
-                )
-                low_loss, low_acc = landa["loss"], landa["acc"]
-                avgs["low_loss"] += low_loss.item()*hyps["loss_scale"]
-                avgs["low_acc"] +=  low_acc.item()
-                avgs["low_top_k"] += landa["top_k"].item()
-                # Regular Model Eval Type
-                package = wrapped_model(
-                    data,
-                    ret_preds=True,
-                    seq_len=hyps["seq_len"],
-                    tforce=False,
-                    gen_ids=try_key(hyps, "gen_ids", False),
-                    no_grad=True
-                )
-                avgs["pred_loss"] += package["loss"].item()
-                avgs["pred_acc"]  += package["acc"].item()
-                avgs["pred_top_k"] += package["top_k"].item()
-                if "rmb_loss" in package:
-                    avgs["rmb_loss"] += package["rmb_loss"].item()
-                    avgs["rmb_acc"]  += package["rmb_acc"].item()
-
-                # High Eval Type
-                landa = get_metrics(
-                    hyps, model, high_inpts, loss_fxn, tforce=False,
-                    seed_len=data["input_ids"].shape[1]
-                )
-                high_loss, high_acc = landa["loss"], landa["acc"]
-                avgs["high_loss"] += high_loss.item()*hyps["loss_scale"]
-                avgs["high_acc"] +=  high_acc.item()
-                avgs["high_top_k"] += landa["top_k"].item()
-        if (i+1) > hyps.get("n_train_loops", np.inf): break
-    for k,v in avgs.items():
-        avgs[k] = round(v/(i+1), 4)
-    print("TFrce Low Loss: {} -- Acc: {}".format(
-        avgs['tlow_loss'], avgs['tlow_acc']
-    ))
-    print("TFrce Pred Loss: {} -- Acc: {}".format(
-        avgs['tpred_loss'], avgs['tpred_acc']
-    ))
-    if hyps["rmb_task"]:
-        print("TFrce RMB Loss: {} -- Acc: {}".format(
-            avgs['trmb_loss'], avgs['trmb_acc']
-        ))
-    print("TFrce High Loss: {} -- Acc: {}".format(
-        avgs['thigh_loss'], avgs['thigh_acc']
-    ))
-
-    if valloader==dataloader:
-        print("Low Loss: {} -- Acc: {}".format(
-            avgs['low_loss'], avgs['low_acc']
-        ))
-        print("Pred Loss: {} -- Acc: {}".format(
-            avgs['pred_loss'], avgs['pred_acc']
-        ))
-        if hyps["rmb_task"]:
-            print("RMB Loss: {} -- Acc: {}".format(
-                avgs['rmb_loss'], avgs['rmb_acc']
-            ))
-        print("High Loss: {} -- Acc: {}".format(
-            avgs['high_loss'], avgs['high_acc']
-        ))
-
-    if valloader!=dataloader:
-        print("Using Separate Validation Loader")
-        for i,data in tqdm(enumerate(valloader)):
-            data = {k: v.to(rank) for k,v in data.items()}
+        loss_fxn = torch.nn.CrossEntropyLoss()
+        keys = math_env.sample_sequence()[-1].keys()
+        df_dict = {
+            **{ "tok_acc":  [], "n_resps":  []},
+            **{k: [] for k in keys}
+        }
+        plen = data_cache.prob_len
+        if verbose and rank==0: print("Evaluating")
+        for i,data in tqdm(enumerate(data_cache)):
+            meta_data = data["meta_data"]
+            for k in meta_data:
+                df_dict[k].append(meta_data[k])
+            if not hyps["model_parallel"]:
+                data["input_ids"] = data["input_ids"].to(rank)
+                data["output_ids"] = data["output_ids"].to(rank)
             with torch.no_grad():
-                model.eval()
                 wrapped_model.eval()
+                model.eval()
 
-                # Low Eval Type
-                low_inpts = {
-                    "input_ids": data["output_ids"],
-                    "attention_mask": data["output_attn_mask"],
-                }
-                landa = get_metrics(
-                  hyps, model, low_inpts, loss_fxn,
-                  tforce=False, seed_len=max(hyps.get("seq_overlap",1),1)
-                )
-                low_loss, low_acc = landa["loss"], landa["acc"]
-                avgs["low_loss"] += low_loss.item()*hyps["loss_scale"]
-                avgs["low_acc"] +=  low_acc.item()
-                avgs["low_top_k"] += landa["top_k"].item()
-
-                # Regular Model Eval Type
                 package = wrapped_model(
                     data,
                     ret_preds=True,
                     seq_len=hyps["seq_len"],
                     tforce=False,
-                    gen_ids=try_key(hyps, "gen_ids", False),
+                    prob_len=data_cache.prob_len,
                     no_grad=True
                 )
-                avgs["pred_loss"] += package["loss"].item()
-                avgs["pred_acc"]  += package["acc"].item()
-                avgs["pred_top_k"] += package["top_k"].item()
-                if "rmb_loss" in package:
-                    avgs["rmb_loss"] += package["rmb_loss"].item()
-                    avgs["rmb_acc"]  += package["rmb_acc"].item()
+                preds = package["preds"][:,plen:]
 
-                # High Eval Type
-                high_inpts = {
-                  "input_ids": torch.cat([
-                    data["input_ids"],data["output_ids"]
-                  ], dim=1),
-                  "attention_mask": torch.cat([ 
-                    data["attention_mask"], data["output_attn_mask"]
-                  ], dim=1)
-                }
-                landa = get_metrics(
-                    hyps, model, high_inpts, loss_fxn, tforce=False,
-                    seed_len=data["input_ids"].shape[1]
-                )
-                high_loss, high_acc = landa["loss"], landa["acc"]
-                avgs["high_loss"] += high_loss.item()*hyps["loss_scale"]
-                avgs["high_acc"] +=  high_acc.item()
-                avgs["high_top_k"] += landa["top_k"].item()
-            if (i+1) > hyps.get("max_val_loops", np.inf): break
-        for k,v in avgs.items():
-            if "t"!=k[0]:
-                avgs[k] = round(v/(i+1), 4)
-        print("Low Loss: {} -- Acc: {}".format(
-            avgs['low_loss'], avgs['low_acc']
-        ))
-        print("Pred Loss: {} -- Acc: {}".format(
-            avgs['pred_loss'], avgs['pred_acc']
-        ))
-        if hyps["rmb_task"]:
-            print("RMB Loss: {} -- Acc: {}".format(
-                avgs['rmb_loss'], avgs['rmb_acc']
-            ))
-        print("High Loss: {} -- Acc: {}".format(
-            avgs['high_loss'], avgs['high_acc']
-        ))
+                counts = envs.CountEnv.parse_counts(
+                    preds,
+                    resp_only=True,
+                ) + int(not hyps.get("incl_bos", True))
+                df_dict["n_resps"].append(counts.cpu().data.numpy())
 
-    for k,v in avgs.items():
-        avgs[k] = [v]
-    df = pd.DataFrame(avgs)
-    for k,v in hyps.items():
-        try:
-            df[k] = v
-        except: print("error for", k)
-    if os.path.exists(hyps["results_file"]):
-        og_df = pd.read_csv(hyps["results_file"])
-        df = og_df.append(df, sort=True)
-    df.to_csv(hyps["results_file"], mode="w", index=False, header=True)
+                out_ids = data["output_ids"][:,plen:]
+                acc = preds==out_ids
+                out_pad_mask = out_ids==tokenizer.pad_idx
+                acc[out_pad_mask] = 0
+                acc = acc.sum(-1)
+                acc = acc / (~out_pad_mask).sum(-1)
+                df_dict["tok_acc"].append(acc.cpu().data.numpy())
+
+                good_idxs = counts.cpu()==meta_data["n_targs"].cpu()
+                if df_dict["tok_acc"][-1].mean() > 0.9 and \
+                              (good_idxs).float().mean()<0.9:
+
+                    print()
+                    print("NTarg:", meta_data["n_targs"][~good_idxs][0])
+                    print("Count:", counts[~good_idxs][0])
+                    print("Inpt ids:", data["input_ids"][~good_idxs][0])
+                    print("Targ ids:", data["output_ids"][~good_idxs][0])
+                    print("Preds:", package["preds"][~good_idxs][0])
+                    print("Abrv Targs:", out_ids[~good_idxs][0])
+                    print("Preds:", preds[~good_idxs][0])
+                    #inpts = data["input_ids"][:,plen:]
+                    #pad_mask = (inpts==tokenizer.pad_idx)|\
+                    #            (inpts==tokenizer.eos_idx)
+                    #print("Out Pad:", out_pad_mask[0])
+                    #print("In Pad:", pad_mask[0])
+                    #assert np.array_equal(
+                    #    out_pad_mask.cpu().numpy(), pad_mask.cpu().numpy()
+                    #)
+
+        for k in df_dict:
+            df_dict[k] = np.concatenate(df_dict[k], axis=0)
+        df = pd.DataFrame(df_dict)
+        print("Making pandas dataframe")
+        for k,v in hyps.items():
+            try:
+                df[k] = v
+            except: print("error for", k)
+        print("Saving...")
+        if os.path.exists(csv_path) and not overwrite:
+            og_df = pd.read_csv(csv_path)
+            df = og_df.append(df, sort=True)
+        df.to_csv(csv_path, mode="w", index=False, header=True)
+        print("Saved to", csv_path)
 
