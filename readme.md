@@ -119,6 +119,11 @@ then running the following command:
     "learnable_posencs": bool
         if true, gradients are backpropagated into the positional
         encodings
+    "pad_pos_skip": bool
+        if this is true, the positional encodings will be added in
+        such a way that they skip tokens based off true values of the
+        `pad_mask`. i.e. the blotched tokens and padded tokens are
+        removed from determining positional indexes.
 
     "incl_intl_prob": bool
         if true, will include the initial problem in the loss. Otherwise

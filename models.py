@@ -336,12 +336,11 @@ class PositionalEncoding(nn.Module):
 
         sums = (~mask).float().sum(-1)
         idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
-        temp = torch.empty_like(x)
-        temp[~mask] = x[~mask] + pe[idxs]
-        temp[mask] = x[mask]
+        fx = torch.empty_like(x)
+        fx[~mask] = x[~mask] + pe[idxs]
+        fx[mask] = x[mask]
 
-        x = self.dropout( x + temp )
-        return x
+        return self.dropout( fx )
 
     def vanil_forward(self, x: Tensor, *args, **kwargs) -> Tensor:
         """
@@ -360,11 +359,11 @@ class PositionalEncoding(nn.Module):
 
         sums = (~mask).float().sum(-1)
         idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
-        temp = torch.empty_like(x)
-        temp[~mask] = x[~mask] + pe[idxs]
-        temp[mask] = x[mask]
+        fx = torch.empty_like(x)
+        fx[~mask] = x[~mask] + pe[idxs]
+        fx[mask] = x[mask]
 
-        return self.dropout( x + temp )
+        return self.dropout( fx )
 
 class RandPositionalEncoding(PositionalEncoding):
     def __init__(self,
