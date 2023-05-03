@@ -19,6 +19,7 @@ class Model(torch.nn.Module):
                        max_posencs:int=1000,
                        posenc_drop_p:float=None,
                        learn_posencs:bool=False,
+                       pad_pos_skip:bool=False,
                        *args, **kwargs):
         """
         n_tokens: int
@@ -51,6 +52,9 @@ class Model(torch.nn.Module):
         learn_posencs: bool
             determines whether or not gradients are backpropagated into
             the positional encodings.
+        pad_pos_skip: bool
+            if true, will skip over masked tokens when applying positional
+            encodings based on the pad mask.
         """
         super().__init__()
         self.n_tokens = n_tokens
@@ -77,7 +81,8 @@ class TransformerModel(Model):
         self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
         self.pos_encoder = globals()[self.posenc_type](
             self.d_model,
-            self.posenc_drop_p,
+            posenc_drop_p=self.posenc_drop_p,
+            drop_p=self.drop_p,
             max_len=self.max_posencs,
             learnable=self.learn_posencs
         )
@@ -112,6 +117,7 @@ class TransformerModel(Model):
                       n_steps:int=10,
                       temperature=None,
                       incl_all_inpts=False,
+                      pad_pos_skip=False,
                       *args, **kwargs):
         """
         Arguments:
@@ -136,6 +142,9 @@ class TransformerModel(Model):
                 spaces". Only applies if using freedom fwd. This is
                 useful to save a concatenation during the data
                 bootstrapping phase.
+            pad_pos_skip: bool
+                if true, will skip over tokens when applying positional
+                encodings based on the pad mask.
         Returns:
             if tforce:
               output Tensor of shape ``[bsize, seq_len, n_tokens]``
@@ -149,6 +158,7 @@ class TransformerModel(Model):
                 mask=mask,
                 pad_mask=pad_mask,
                 is_causal=is_causal,
+                pad_pos_skip=pad_pos_skip
             )
         else:
             return self.freedom_fwd(
@@ -157,13 +167,15 @@ class TransformerModel(Model):
                 pad_mask=pad_mask,
                 is_causal=is_causal,
                 n_steps=n_steps,
-                incl_all_inpts=incl_all_inpts
+                incl_all_inpts=incl_all_inpts,
+                pad_pos_skip=pad_pos_skip
             )
 
     def tforce_fwd(self, src:torch.Tensor,
                       mask:torch.Tensor=None,
                       pad_mask:torch.Tensor=None,
-                      is_causal:bool=None):
+                      is_causal:bool=None,
+                      pad_pos_skip:bool=False):
         """
         Arguments:
             src: Tensor, shape ``[bsize, seq_len]``
@@ -173,6 +185,9 @@ class TransformerModel(Model):
                 If specified, applies a causal mask as mask (optional)
                 and ignores attn_mask for computing scaled dot product
                 attention.
+            pad_pos_skip: bool
+                if true, will skip over tokens when applying positional
+                encodings based on the pad mask.
         Returns:
             output Tensor of shape ``[bsize, seq_len, n_tokens]``
         """
@@ -185,7 +200,10 @@ class TransformerModel(Model):
             temp = generate_square_subsequent_mask(embs.shape[1])
             mask = temp|mask
             mask = mask.to(self.get_device())
-        embs = self.pos_encoder(embs)
+        embs = self.pos_encoder(
+            embs,
+            pad_mask=pad_mask if pad_pos_skip else None
+        )
         output = self.transformer_encoder(
             embs,
             mask=mask,
@@ -198,7 +216,8 @@ class TransformerModel(Model):
                       pad_mask:torch.Tensor=None,
                       is_causal:bool=None,
                       n_steps:int=10,
-                      incl_all_inpts:bool=False):
+                      incl_all_inpts:bool=False,
+                      pad_pos_skip:bool=False):
         """
         Arguments:
             src: Tensor, shape ``[bsize, seq_len]``
@@ -216,6 +235,10 @@ class TransformerModel(Model):
                 prediction tensor. otherwise only includes "predicted
                 spaces". This is useful to save a concatenation during
                 the data bootstrapping phase.
+            pad_pos_skip: bool
+                if true, will skip over masked tokens when applying
+                positional encodings based on the pad mask. True values
+                in the mask will be skipped.
         Returns:
             output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
         """
@@ -249,7 +272,10 @@ class TransformerModel(Model):
             mask = mask.to(self.get_device())
 
         for step in range(n_loops):
-            temp = self.pos_encoder(embs[:,:S+step])
+            temp = self.pos_encoder(
+                embs[:,:S+step],
+                pad_mask=pad_mask if pad_pos_skip else None
+            )
             output = self.transformer_encoder(
                 temp,
                 mask=mask[:S+step, :S+step],
@@ -270,37 +296,107 @@ def generate_square_subsequent_mask(sz: int) -> Tensor:
     #return torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
     return torch.triu(torch.ones(sz, sz), diagonal=1).bool()
 
-class RandPositionalEncoding(nn.Module):
+class PositionalEncoding(nn.Module):
     def __init__(self,
-                 d_model:int,
-                 dropout:float=0.1,
-                 max_len:int=1000,
-                 learnable:bool=False):
+                 posenc_drop_p:float=0,
+                 drop_p:float=0.1,
+                 max_len:int=1000):
         super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
+        self.posenc_dropout = nn.Dropout(p=posenc_drop_p)
+        self.dropout = nn.Dropout(p=drop_p)
+        self.arange = np.arange(max_len).astype("int")
 
-        scale = (-math.log(10000.0) / d_model)
-        pe = scale*torch.randn(max_len, d_model)
-        if learnable: self.pe = torch.nn.Parameter(pe)
-        else: self.register_buffer('pe', pe)
+    def rand_forward(self, x: Tensor, *args, **kwargs) -> Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
+        """
+        n = np.random.randint(x.size(1), self.pe.shape[0]+1)
+        idxs = torch.sort(torch.randperm(n)[:x.size(1)]).values.long()
+        x = self.dropout( x + self.posenc_dropout(self.pe[idxs]) )
+        return x
 
-    def forward(self, x: Tensor) -> Tensor:
+    def skip_rand_forward(
+            self,
+            x: Tensor,
+            mask: Tensor,
+            *args,
+            **kwargs
+        ) -> Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
+            mask: Tensor, shape ``[batch_size, seq_len]``
+                pad mask. true values represent padding/blotching
+        """
+        # pe: N, E
+        n = np.random.randint(x.size(1), self.pe.shape[0]+1)
+        idxs = torch.sort(torch.randperm(n)[:x.size(1)]).values.long()
+        pe = self.posenc_dropout(self.pe[idxs])
+
+        sums = (~mask).float().sum(-1)
+        idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
+        temp = torch.empty_like(x)
+        temp[~mask] = x[~mask] + pe[idxs]
+        temp[mask] = x[mask]
+
+        x = self.dropout( x + temp )
+        return x
+
+    def vanil_forward(self, x: Tensor, *args, **kwargs) -> Tensor:
         """
         Arguments:
             x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
         """
-        perm = torch.randperm(self.pe.shape[0]).long()[:x.size(1)]
-        x = x + self.dropout(self.pe[torch.sort(perm).values.long()])
+        x = self.dropout( x + self.posenc_dropout(self.pe[:x.size(1)]) )
         return x
 
-class RandSinPositionalEncoding(nn.Module):
+    def skip_vanil_forward(self, x: Tensor, *args, **kwargs) -> Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
+        """
+        pe = self.posenc_dropout(self.pe[:x.size(1)])
+
+        sums = (~mask).float().sum(-1)
+        idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
+        temp = torch.empty_like(x)
+        temp[~mask] = x[~mask] + pe[idxs]
+        temp[mask] = x[mask]
+
+        return self.dropout( x + temp )
+
+class RandPositionalEncoding(PositionalEncoding):
     def __init__(self,
                  d_model:int,
-                 dropout:float=0.1,
+                 posenc_drop_p:float=0,
+                 drop_p:float=0.1,
                  max_len:int=1000,
-                 learnable:bool=False):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
+                 learnable:bool=False,
+                 pad_pos_skip:bool=False):
+        super().__init__(posenc_drop_p, drop_p, max_len=max_len)
+        self.pad_pos_skip = pad_pos_skip
+
+        pe = 0.1*math.sqrt(max_len/d_model)*torch.randn(max_len,d_model)
+        if learnable: self.pe = torch.nn.Parameter(pe)
+        else: self.register_buffer('pe', pe)
+
+        if pad_pos_skip:
+            self.forward = self.skip_rand_forward
+        else:
+            self.forward = self.rand_forward
+
+class SinPositionalEncoding(PositionalEncoding):
+    def __init__(self,
+                 d_model:int,
+                 posenc_drop_p:float=0,
+                 drop_p:float=0.1,
+                 max_len:int=1000,
+                 learnable:bool=False,
+                 pad_pos_skip:bool=False):
+        super().__init__(posenc_drop_p, drop_p, max_len=max_len)
+        self.pad_pos_skip = pad_pos_skip
+
         position = torch.arange(max_len).unsqueeze(1)
         scale = (-math.log(10000.0) / d_model)
         div_term = torch.exp(torch.arange(0, d_model, 2) * scale)
@@ -311,40 +407,20 @@ class RandSinPositionalEncoding(nn.Module):
         if learnable: self.pe = torch.nn.Parameter(pe)
         else: self.register_buffer('pe', pe)
 
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Arguments:
-            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
-        """
-        perm = torch.randperm(self.pe.shape[0]).long()[:x.size(1)]
-        x = x + self.dropout(self.pe[torch.sort(perm).values.long()])
-        return x
+        if pad_pos_skip:
+            self.forward = self.skip_vanil_forward
+        else:
+            self.forward = self.vanil_forward
 
-class SinPositionalEncoding(nn.Module):
-    def __init__(self,
-                 d_model:int,
-                 dropout:float=0.1,
-                 max_len:int=1000,
-                 learnable:bool=False):
-        super().__init__()
-        self.dropout = nn.Dropout(p=dropout)
-        position = torch.arange(max_len).unsqueeze(1)
-        scale = (-math.log(10000.0) / d_model)
-        div_term = torch.exp(torch.arange(0, d_model, 2) * scale)
-        pe = torch.zeros(max_len, d_model)
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
 
-        if learnable: self.pe = torch.nn.Parameter(pe)
-        else: self.register_buffer('pe', pe)
+class RandSinPositionalEncoding(SinPositionalEncoding):
+    def __init__(self,*args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.pad_pos_skip:
+            self.forward = self.skip_rand_forward
+        else:
+            self.forward = self.rand_forward
 
-    def forward(self, x: Tensor) -> Tensor:
-        """
-        Arguments:
-            x: Tensor, shape ``[seq_len, batch_size, embedding_dim]``
-        """
-        x = x + self.dropout(self.pe[:x.size(1)])
-        return x
 
 class LossWrapper(torch.nn.Module):
     """
