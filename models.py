@@ -328,9 +328,9 @@ class PositionalEncoding(nn.Module):
 
         sums = (~mask).float().sum(-1)
         idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
-        fx = torch.empty_like(x)
-        fx[~mask] = x[~mask] + pe[idxs]
-        fx[mask] = x[mask]
+        fx = torch.zeros_like(x)
+        fx = x + fx
+        fx[~mask] += pe[idxs]
 
         return self.dropout( fx )
 
@@ -360,9 +360,9 @@ class PositionalEncoding(nn.Module):
 
         sums = (~mask).float().sum(-1)
         idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
-        fx = torch.empty_like(x)
-        fx[~mask] = x[~mask] + pe[idxs]
-        fx[mask] = x[mask]
+        fx = torch.zeros_like(x)
+        fx = x + fx
+        fx[~mask] += pe[idxs]
 
         return self.dropout( fx )
 
