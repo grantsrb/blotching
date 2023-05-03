@@ -1,0 +1,52 @@
+{
+    "exp_name":  "my_first_training",
+    "save_root": "~/",
+
+    "multi_gpu": false,
+    "model_parallel": false,
+    "torch_dtype": "float16",
+    "seed": 123456,
+
+    "init_checkpt": null,
+
+    "model_type":  "TransformerModel",
+    "digit_embs": true,
+    "posenc_type": "SinPositionalEncoding",
+    "learn_posencs": false,
+    "max_posencs": null,
+    "pad_pos_skip": true,
+
+    "star": true,
+    "pre_epochs": 1,
+    "n_runner_procs": 1,
+
+    "seq_len": null,
+    "max_samples": 100000,
+    "val_samples": 10000,
+
+    "collection_size": 500,
+
+    "max_num": 100,
+    "max_ents": 3,
+    "p_mult": 0,
+
+    "incl_intl_prob": false,
+
+    "d_model": 128,
+    "n_heads": 4,
+    "h_mult": 4,
+    "n_layers": 2,
+
+    "n_epochs":       40,
+    "batch_size":     128,
+    "val_batch_size": 500,
+    "lr": 8e-4,
+    "l2": 0,
+    "drop_p": 0,
+    "blotch_p": 0.4,
+    "contig_blotches": true,
+    "n_grad_loops": 1,
+    "grad_clip": 0,
+    "grad_scaling": false,
+    "patience": 5
+}
