@@ -9,12 +9,6 @@ Or:
 
 $ python3 eval_model.py path/to/model_checkpt.pt
 
-If you would like to run the untrained model to see the baseline
-performance, either use the `baseline_performance.py` script or
-include `untrained` in the bash command.
-
-WARNING!!! THE FOLLOWING LINE IS FOR BASELINE RESULTS:
-$ python3 eval_model.py path/to/model_folder untrained
 """
 import torch
 import torch.distributed as dist
@@ -32,6 +26,7 @@ import ml_utils.save_io as io
 import datas
 from models import *
 import envs
+import training
 
 if __name__=="__main__":
     rank = 0
@@ -70,8 +65,8 @@ if __name__=="__main__":
         checkpt = io.load_checkpoint(model_folder)
         hyps = checkpt["hyps"]
 
-        hyps["model_type"] = hyps["model_string"]
-        if abbrev_len is not None: hyps["abbrev_len"] = abbrev_len
+        if "model_string" in hyps:
+            hyps["model_type"] = hyps["model_string"]
         hyps["results_file"] = results_file
         hyps["seed"] = hyps.get("seed", int(time.time()))
         if hyps["seed"] is None: hyps["seed"] = int(time.time())
@@ -83,7 +78,6 @@ if __name__=="__main__":
 
         # Establish math environment parameters
         math_env = envs.MathEnv(**hyps)
-
         # Make Tokenizer
         tokenizer = datas.Tokenizer.get_tokenizer(**hyps)
 
@@ -93,8 +87,7 @@ if __name__=="__main__":
 
         # Wrap model and place on gpu
         wrapped_model = LossWrapper( model, tokenizer, hyps=hyps )
-        if not hyps["model_parallel"]:
-            wrapped_model.to(rank)
+        if not hyps["model_parallel"]: wrapped_model.to(rank)
 
         # Make dataset
         if verbose and rank==0: print("Collecting Data")
@@ -104,20 +97,26 @@ if __name__=="__main__":
             max_len=None,
             batch_size=hyps["val_batch_size"]
         )
-        if verbose and rank==0: print("Total Samples:", len(data_cache))
+        if verbose and rank==0:
+            print("Total Samples:", len(data_cache))
 
         loss_fxn = torch.nn.CrossEntropyLoss()
-        keys = math_env.sample_sequence()[-1].keys()
         df_dict = {
-            **{ "tok_acc":  [], "n_resps":  []},
-            **{k: [] for k in keys}
+            "tok_acc":  [],
+            "ans": [],
+            "targ": [],
+            "pred_str": [],
+            "prob_str": [],
+            "soln_str": [],
         }
+        df_dict = {**df_dict, **{k:[] for k in data_cache.meta_data}}
         plen = data_cache.prob_len
         if verbose and rank==0: print("Evaluating")
         for i,data in tqdm(enumerate(data_cache)):
-            meta_data = data["meta_data"]
-            for k in meta_data:
-                df_dict[k].append(meta_data[k])
+            if "meta_data" in data:
+                meta_data = data["meta_data"]
+                for k in meta_data:
+                    df_dict[k].append(meta_data[k])
             if not hyps["model_parallel"]:
                 data["input_ids"] = data["input_ids"].to(rank)
                 data["output_ids"] = data["output_ids"].to(rank)
@@ -130,50 +129,37 @@ if __name__=="__main__":
                     ret_preds=True,
                     seq_len=hyps["seq_len"],
                     tforce=False,
-                    prob_len=data_cache.prob_len,
-                    no_grad=True
+                    prob_len=plen,
+                    no_grad=True,
+                    incl_all_inpts=True,
                 )
-                preds = package["preds"][:,plen:]
+                pred_ids = package["preds"]
 
-                counts = envs.CountEnv.parse_counts(
-                    preds,
-                    resp_only=True,
-                ) + int(not hyps.get("incl_bos", True))
-                df_dict["n_resps"].append(counts.cpu().data.numpy())
+                out_ids = data["output_ids"][:,:plen]
+                stats = get_stats(tokenizer=tokenizer, ids=out_ids)
+                df_dict["targ"]     += stats["resp"]
+                df_dict["soln_str"] += stats["full"]
+                df_dict["soln_len"] += stats["length"]
+
+                stats = get_stats(tokenizer=tokenizer, ids=pred_ids)
+                df_dict["ans"]      += stats["resp"]
+                df_dict["prob_str"] += stats["first"]
+                df_dict["pred_str"] += stats["full"]
 
                 out_ids = data["output_ids"][:,plen:]
-                acc = preds==out_ids
+                acc = pred_ids==out_ids
                 out_pad_mask = out_ids==tokenizer.pad_idx
                 acc[out_pad_mask] = 0
                 acc = acc.sum(-1)
                 acc = acc / (~out_pad_mask).sum(-1)
                 df_dict["tok_acc"].append(acc.cpu().data.numpy())
 
-                good_idxs = counts.cpu()==meta_data["n_targs"].cpu()
-                if df_dict["tok_acc"][-1].mean() > 0.9 and \
-                              (good_idxs).float().mean()<0.9:
-
-                    print()
-                    print("NTarg:", meta_data["n_targs"][~good_idxs][0])
-                    print("Count:", counts[~good_idxs][0])
-                    print("Inpt ids:", data["input_ids"][~good_idxs][0])
-                    print("Targ ids:", data["output_ids"][~good_idxs][0])
-                    print("Preds:", package["preds"][~good_idxs][0])
-                    print("Abrv Targs:", out_ids[~good_idxs][0])
-                    print("Preds:", preds[~good_idxs][0])
-                    #inpts = data["input_ids"][:,plen:]
-                    #pad_mask = (inpts==tokenizer.pad_idx)|\
-                    #            (inpts==tokenizer.eos_idx)
-                    #print("Out Pad:", out_pad_mask[0])
-                    #print("In Pad:", pad_mask[0])
-                    #assert np.array_equal(
-                    #    out_pad_mask.cpu().numpy(), pad_mask.cpu().numpy()
-                    #)
-
-        for k in df_dict:
+        for k in ["tok_acc", "tok_loss"]:
             df_dict[k] = np.concatenate(df_dict[k], axis=0)
-        df = pd.DataFrame(df_dict)
         print("Making pandas dataframe")
+        for k in df_dict:
+            print(k, df_dict[k][:4])
+        df = pd.DataFrame(df_dict)
         for k,v in hyps.items():
             try:
                 df[k] = v
@@ -185,3 +171,22 @@ if __name__=="__main__":
         df.to_csv(csv_path, mode="w", index=False, header=True)
         print("Saved to", csv_path)
 
+def get_stats(tokenizer, ids, remove_padding=True):
+    stats = {
+        "length": [],
+        "resp": [],
+        "full": [],
+        "first": [], # The chunk of string preceding the first separator
+    }
+    pred_strings = tokenizer.decode(ids)
+    eos = tokenizer.eos
+    sep = tokenizer.sep
+    pad = tokenizer.pad
+    for i,pred in enumerate(pred_strings):
+        if remove_padding: pred = pred.replace(pad, "")
+        stats["full"].append(pred)
+        stats["length"].append(len(pred))
+        splt = pred.split(eos)[0].split(sep)
+        stats["resp"].append(splt[-1])
+        stats["first"].append(splt[0])
+    return stats
