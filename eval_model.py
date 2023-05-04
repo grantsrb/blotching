@@ -28,6 +28,28 @@ from models import *
 import envs
 import training
 
+def get_stats(tokenizer, ids, remove_padding=True):
+    stats = {
+        "length": [],
+        "resp": [],
+        "pred": [],
+        "first": [], # The chunk of string preceding the first separator
+    }
+    pred_strings = tokenizer.decode(ids)
+    eos = tokenizer.eos
+    sep = tokenizer.sep
+    pad = tokenizer.pad
+    for i,pred in enumerate(pred_strings):
+        if remove_padding: pred = pred.replace(pad, "")
+        pred = pred.split(eos)[0]
+        stats["pred"].append(pred)
+        stats["length"].append(len(pred))
+        splt = pred.split(sep)
+        stats["resp"].append(splt[-1])
+        stats["first"].append(splt[0])
+    return stats
+
+
 if __name__=="__main__":
     rank = 0
     verbose = True
@@ -35,6 +57,10 @@ if __name__=="__main__":
     abbrev_len = 1000
     bsize = None # Determines batch size of evaluation
     overwrite = False
+    testing = True
+
+    if testing:
+        print("CURRENTLY IN TESTING MODE!!!!")
 
     model_folders = []
     for arg in sys.argv[1:]:
@@ -53,9 +79,10 @@ if __name__=="__main__":
             except:
                 print("Unrecognized arg", arg)
     if overwrite: print("Overwriting!!!")
+    data_caches = {}
     for f,model_folder in enumerate(model_folders):
         csv_path = os.path.join(model_folder, results_file)
-        if not overwrite and os.path.exists(csv_path):
+        if not testing and not overwrite and os.path.exists(csv_path):
             print(csv_path, "already exists, skipping....")
             continue
         print(
@@ -91,12 +118,21 @@ if __name__=="__main__":
 
         # Make dataset
         if verbose and rank==0: print("Collecting Data")
-        data_cache = datas.get_validation_set(
-            math_env,
-            tokenizer,
-            max_len=None,
-            batch_size=hyps["val_batch_size"]
+        if testing: math_env.max_num = 10
+        cache_tup = (
+            math_env.max_num, math_env.max_ents, math_env.p_mult,
+            math_env.p_paren, math_env.space_mults
         )
+        if cache_tup in data_caches:
+            data_cache = data_caches[cache_tup]
+        else:
+            data_cache = datas.get_validation_set(
+                math_env,
+                tokenizer,
+                max_len=None,
+                batch_size=hyps["val_batch_size"]
+            )
+            data_caches[cache_tup] = data_cache
         if verbose and rank==0:
             print("Total Samples:", len(data_cache))
 
@@ -108,15 +144,13 @@ if __name__=="__main__":
             "pred_str": [],
             "prob_str": [],
             "soln_str": [],
+            "label_str": [],
         }
-        df_dict = {**df_dict, **{k:[] for k in data_cache.meta_data}}
         plen = data_cache.prob_len
         if verbose and rank==0: print("Evaluating")
         for i,data in tqdm(enumerate(data_cache)):
             if "meta_data" in data:
                 meta_data = data["meta_data"]
-                for k in meta_data:
-                    df_dict[k].append(meta_data[k])
             if not hyps["model_parallel"]:
                 data["input_ids"] = data["input_ids"].to(rank)
                 data["output_ids"] = data["output_ids"].to(rank)
@@ -136,29 +170,33 @@ if __name__=="__main__":
                 pred_ids = package["preds"]
 
                 out_ids = data["output_ids"][:,:plen]
-                stats = get_stats(tokenizer=tokenizer, ids=out_ids)
-                df_dict["targ"]     += stats["resp"]
-                df_dict["soln_str"] += stats["full"]
-                df_dict["soln_len"] += stats["length"]
+                probs = meta_data["probs"]
+                solns =  meta_data["solns"]
+                labels =  meta_data["labels"]
+                for prob,soln,label in zip(probs, solns,labels):
+                    df_dict["targ"].append(
+                     soln.split(tokenizer.eos)[0].split(tokenizer.sep)[-1]
+                    )
+                    df_dict["soln_str"].append(soln[1:])
+                    df_dict["prob_str"].append(prob)
+                    df_dict["label_str"].append(label)
 
                 stats = get_stats(tokenizer=tokenizer, ids=pred_ids)
                 df_dict["ans"]      += stats["resp"]
-                df_dict["prob_str"] += stats["first"]
-                df_dict["pred_str"] += stats["full"]
+                df_dict["pred_str"] += stats["pred"]
 
                 out_ids = data["output_ids"][:,plen:]
-                acc = pred_ids==out_ids
+                acc = pred_ids[:,plen+1:]==out_ids
                 out_pad_mask = out_ids==tokenizer.pad_idx
                 acc[out_pad_mask] = 0
-                acc = acc.sum(-1)
+                acc = acc.float().sum(-1)
                 acc = acc / (~out_pad_mask).sum(-1)
                 df_dict["tok_acc"].append(acc.cpu().data.numpy())
 
-        for k in ["tok_acc", "tok_loss"]:
-            df_dict[k] = np.concatenate(df_dict[k], axis=0)
+        df_dict["tok_acc"] = np.concatenate(df_dict["tok_acc"], axis=0)
         print("Making pandas dataframe")
         for k in df_dict:
-            print(k, df_dict[k][:4])
+            print(k, len(df_dict[k]), df_dict[k][0])
         df = pd.DataFrame(df_dict)
         for k,v in hyps.items():
             try:
@@ -168,25 +206,6 @@ if __name__=="__main__":
         if os.path.exists(csv_path) and not overwrite:
             og_df = pd.read_csv(csv_path)
             df = og_df.append(df, sort=True)
-        df.to_csv(csv_path, mode="w", index=False, header=True)
-        print("Saved to", csv_path)
-
-def get_stats(tokenizer, ids, remove_padding=True):
-    stats = {
-        "length": [],
-        "resp": [],
-        "full": [],
-        "first": [], # The chunk of string preceding the first separator
-    }
-    pred_strings = tokenizer.decode(ids)
-    eos = tokenizer.eos
-    sep = tokenizer.sep
-    pad = tokenizer.pad
-    for i,pred in enumerate(pred_strings):
-        if remove_padding: pred = pred.replace(pad, "")
-        stats["full"].append(pred)
-        stats["length"].append(len(pred))
-        splt = pred.split(eos)[0].split(sep)
-        stats["resp"].append(splt[-1])
-        stats["first"].append(splt[0])
-    return stats
+        if not testing:
+            df.to_csv(csv_path, mode="w", index=False, header=True)
+            print("Saved to", csv_path)
