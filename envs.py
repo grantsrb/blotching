@@ -3,6 +3,34 @@ import collections
 
 mult_sign = "*"
 sum_sign = "+"
+"""
+REARRANGE:
+The rearrange operation reorders the entities within the equation so
+that the magnitudes are in progressive order. It does not change the
+relative ordering of values within a magnitude.
+
+DECOMPOSE:
+The decomposition operation separates the value of a particular magnitude
+from a greater magnitude. So, for instance, 101=1+100 would be a
+decompose3->1, and 110=10+100 would be decompose3->2
+
+SUM
+The sum operation applies only to values within the same magnitude. For
+instance, 4+5=9 is a sum1->1, whereas 5+6=11 is a sum1->2, and 20+90=110
+is a sum2->3. Summing values that are of different magnitudes is called
+a COMBINE operation.
+
+COMBINE
+Similar to sum, but combine refers to summing values of different
+magnitudes. For instance 10+100=110 is a combine2->3 operation, whereas
+1+20=21 is a combine1->2 operation.
+"""
+REARRANGE = "rearrange"
+DECOMPOSE = "decompose"
+# used when two numbers of the same magnitude are summed
+SUM = "sum"
+COMBINE = "combine"
+SOLN_TYPES = [ REARRANGE, DECOMPOSE, SUM, COMBINE ]
 
 class MathEnv:
     """
@@ -63,7 +91,7 @@ class MathEnv:
         Args:
             max_num: int
                 the maximum number available for sampling the initial
-                problem
+                problem (inclusive)
             max_ents: int
                 maximum entities for the starting problem. If using
                 parentheticals, a parenthetical counts as one entity,
@@ -86,6 +114,7 @@ class MathEnv:
         self.p_paren = p_paren
         self.space_mults = space_mults
         assert p_paren==0, "Parentheses are not yet implemented"
+        self.prob_len = (len(str(self.max_num))+1)*self.max_ents - 1
 
     def sample(self):
         """
@@ -106,7 +135,7 @@ class MathEnv:
         Args:
             max_num: int
                 the maximum number available for sampling the initial
-                problem
+                problem (inclusive)
             max_ents: int
                 maximum entities for the starting problem. If using
                 parentheticals, a parenthetical counts as one entity,
@@ -164,7 +193,7 @@ class MathEnv:
         return len(entity) + 1
 
     @staticmethod
-    def find_soln(prob, max_statements=np.inf):
+    def find_soln(prob, max_statements=np.inf, ret_labels=False):
         """
         Finds the algorithmic solution to the initial problem string.
 
@@ -174,7 +203,15 @@ class MathEnv:
                 only contain digits and + or * symbols.
             max_statements: int
                 the maximum number of math statements
+            ret_labels: bool
+                if true, will return a list that indicates the type
+                of operation that was performed to arrive at the
+                corresponding step. Thus the length of the list is
+                equal to the number of equals signs + 1.
         Returns:
+            labels: list of str
+                a list of operation labels, only returned if ret_labels
+                is true.
             soln: str
                 the solution as dictated by the following algorithm
                 starting from left to right, each step has its own
@@ -209,6 +246,8 @@ class MathEnv:
         if statement not in statement_set:
             statement_set.add(statement)
             statements.append(statement)
+            labels = [REARRANGE]
+
 
         # Decompose Multiplication Terms
         loop = 0
@@ -239,6 +278,7 @@ class MathEnv:
             if statement not in statement_set:
                 statement_set.add(statement)
                 statements.append(statement)
+                labels.append(DECOMPOSE+"mult")
             loop += 1
         if sum_sign not in statement and mult_sign not in statement:
             return "=".join(statements)
@@ -259,6 +299,9 @@ class MathEnv:
                             if statement not in statement_set:
                                 statement_set.add(statement)
                                 statements.append(statement)
+                                labels.append(
+                                    DECOMPOSE+"{}->{}".format(j,mag)
+                                )
         #print("Through decomp")
         #print("=".join(statements))
         #print("Beginning Summation")
@@ -277,6 +320,7 @@ class MathEnv:
                     if statement not in statement_set:
                         statement_set.add(statement)
                         statements.append(statement)
+                        labels.append(SUM+"{}->{}".format(mag,len(ent))
 
                     # Decompose if remaining values of mag magnitude
                     if len(ent) != mag and len(ent_dict[mag])>0 and\
@@ -295,6 +339,9 @@ class MathEnv:
                         if statement not in statement_set:
                             statement_set.add(statement)
                             statements.append(statement)
+                            labels.append(
+                                DECOMPOSE+"{}->{}".format(len(ent),mag)
+                            )
                 if len(ent_dict[mag])==1:
                     #print("inside final loop", mag, statements[-1])
                     ent1 = ent_dict[mag].pop()
@@ -308,8 +355,13 @@ class MathEnv:
                                 #print("adding statement", statement)
                                 statement_set.add(statement)
                                 statements.append(statement)
+                                labels.append(
+                                    COMBINE+"{}->{}".format(mag,j)
+                                )
                             break
-        return "=".join(statements[1:])
+        soln = "=".join(statements[1:])
+        if ret_labels: return soln, labels
+        return soln
 
     @staticmethod
     def frag_ent(ent, mag):
