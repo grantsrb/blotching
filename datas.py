@@ -5,21 +5,25 @@ import copy
 import numpy as np
 
 class DataIterable:
-    def __init__(self, data, batch_size=128):
+    def __init__(self, data, batch_size=128, meta_data=None):
         """
         Args:
             data: torch tensor (N, S)
                 N is total samples, S is seq len
             batch_size: int
                 the batch size
+            meta_data: dict of sequences or None
+                optional additional dict of meta data for each row
+                in data
         """
         self.data = data
+        self.meta_data = meta_data
         self.batch_size = batch_size
         self.idx = 0
         self.perm = torch.randperm(len(self.data)).long()
 
     def __len__(self):
-        return len(self.perm)//self.batch_size
+        return int(np.ceil(len(self.perm)/self.batch_size))
 
     def __iter__(self):
         return self
@@ -38,10 +42,16 @@ class DataIterable:
             end = strt + self.batch_size
             self.idx += 1
             sampls = self.data[self.perm[strt:end]]
-            return {
+            data = {
                 "input_ids": sampls[:,:-1],
                 "output_ids": sampls[:,1:],
             }
+            if self.meta_data:
+                data["meta_data"] = {}
+                for k in self.meta_data:
+                    d = self.meta_data[k][self.perm[strt:end]]
+                    data["meta_data"][k] = d
+            return data
         raise StopIteration
 
 class DataCache(torch.utils.data.Dataset):
@@ -54,6 +64,7 @@ class DataCache(torch.utils.data.Dataset):
                        init_data=None,
                        dtype="long",
                        prob_len=None,
+                       meta_data=None,
                        *args, **kwargs):
         """
         max_samples: int
@@ -67,6 +78,8 @@ class DataCache(torch.utils.data.Dataset):
         prob_len: int or None
             the index location at which the problem ends and the
             solution begins. This is useful to speed up operations.
+        meta_data: dict of lists (optional)
+            meta data corresponding to each row in the data
         """
         self.batch_size = batch_size
         self.cache = torch.zeros(max_samples, seq_len)
@@ -74,7 +87,11 @@ class DataCache(torch.utils.data.Dataset):
         self.is_full = False
         self.idx = 0
         if init_data is not None:
+            # Currently we need meta_data to be None to use add_data
+            # function
+            self.meta_data = None
             self.add_data(init_data)
+        self.meta_data = meta_data
         self.prob_len = prob_len
 
     @property
@@ -97,7 +114,11 @@ class DataCache(torch.utils.data.Dataset):
         new_data: torch tensor (B, S)
             a batch of new data. if the total amount of data exceeds
             self.max_samples, the oldest data will be replaced first.
+        meta_data: dict of sequences or None
+            the rows of meta_data should align with the rows of the
+            cache
         """
+        if self.meta_data: raise NotImplemented
         sl = min(new_data.shape[1], self.seq_len)
         if len(new_data) < self.max_samples-self.idx:
             strt = self.idx
@@ -130,20 +151,30 @@ class DataCache(torch.utils.data.Dataset):
         Returns:
             sample: torch tensor (1, seq_len)
         """
-        return {
+        data = {
             "input_indices": self.cache[idx:idx+1,:-1],
             "output_indices": self.cache[idx:idx+1,1:],
         }
+        if self.meta_data:
+            data["meta_data"] = {}
+            for k in self.meta_data:
+                d = self.meta_data[k][idx:idx+1]
+                data["meta_data"][k] = d
+        return data
 
     def __iter__(self):
         self.iter_idx = 0
         if self.is_full:
             iterable = DataIterable(
-                self.cache.clone(), batch_size=self.batch_size
+                self.cache.clone(),
+                meta_data=self.meta_data,
+                batch_size=self.batch_size
             )
         else:
             iterable = DataIterable(
-                self.cache[:self.idx].clone(), batch_size=self.batch_size
+                self.cache[:self.idx].clone(),
+                meta_data=self.meta_data,
+                batch_size=self.batch_size
             )
         return iterable
 
@@ -684,7 +715,7 @@ def sample_data(math_env,
         probs: torch LongTensor (n_samples, (max_digits+1)*max_ents-1)
         solns: torch LongTensor (n_samples, max_len-probs.shape[1])
     """
-    plen = (len(str(math_env.max_num))+1)*math_env.max_ents - 1
+    plen = math_env.prob_len
     if max_len is None: slen = plen 
     else: slen = max_len-plen
     assert slen>0, "Needs larger max_len!"
@@ -795,22 +826,49 @@ def get_validation_set(
     Returns:
         data_cache: DataCache
     """
-    if max_samples is None: max_samples = init_samples
-    probs, solns = sample_data(
-        math_env,
-        tokenizer,
-        n_samples=init_samples,
-        max_len=seq_len
+    probs = []
+    solns = []
+    labels = []
+    max_soln_len = 0
+    for i in range(math_env.max_num+1):
+        for j in range(math_env.max_num+1):
+            for k in range(math_env.max_num+1):
+                probs.append( "{}+{}+{}".format(i,j,k) )
+                soln, labs = envs.MathEnv.find_soln(
+                    probs[-1],ret_labels=True
+                )
+                labels.append(labs)
+                solns.append( tokenizer.sep + soln )
+                if len(solns[-1])>max_soln_len:
+                    max_soln_len = len(solns[-1])
+    prob_ids = tokenizer(probs,
+        as_tensor=True,
+        max_len=math_env.prob_len,
+        pad=True,
+        add_eos=False
     )
-    prob_len = probs.shape[1]
-    data = torch.cat([probs, solns], dim=1)
-    if seq_len is None: seq_len = data.shape[-1]
+    if max_len is None: slen = max_soln_len
+    else: slen = max_len - math_env.prob_len
+    soln_ids = tokenizer(solns,
+        as_tensor=True,
+        max_len=slen,
+        pad=True,
+        add_eos=True
+    )
+    prob_len = prob_ids.shape[1]
+    data = torch.cat([prob_ids, soln_ids], dim=1)
+    seq_len = data.shape[-1]
     data_cache = DataCache(
         max_samples=max_samples,
         seq_len=seq_len,
         batch_size=batch_size,
         init_data=data,
-        prob_len=prob_len
+        prob_len=prob_len,
+        meta_data={
+            "labels": labels,
+            "probs": probs,
+            "solns": solns
+        }
     )
     return data_cache
 
