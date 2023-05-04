@@ -239,6 +239,7 @@ class MathEnv:
                         hundreds digit forms, got back to step 1
         """
         statements = [prob]
+        labels = []
         statement_set = set(statements)
         ents = statements[-1].split(sum_sign)
         ent_dict = MathEnv.get_ent_dict(ents)
@@ -246,7 +247,7 @@ class MathEnv:
         if statement not in statement_set:
             statement_set.add(statement)
             statements.append(statement)
-            labels = [REARRANGE]
+            labels.append(REARRANGE)
 
 
         # Decompose Multiplication Terms
@@ -320,7 +321,7 @@ class MathEnv:
                     if statement not in statement_set:
                         statement_set.add(statement)
                         statements.append(statement)
-                        labels.append(SUM+"{}->{}".format(mag,len(ent))
+                        labels.append(SUM+"{}->{}".format(mag,len(ent)))
 
                     # Decompose if remaining values of mag magnitude
                     if len(ent) != mag and len(ent_dict[mag])>0 and\
