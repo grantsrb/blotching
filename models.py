@@ -450,6 +450,7 @@ class LossWrapper(torch.nn.Module):
                                              prob_len=None,
                                              incl_intl_prob=False,
                                              temperature=1.,
+                                             incl_all_inpts=False,
                                              top_k=5):
         """
         Args:
@@ -478,6 +479,12 @@ class LossWrapper(torch.nn.Module):
                 a temperature parameter for softmax sampling. Set to
                 low number for high confidence sampling, high value
                 for low confidence sampling
+            incl_all_inpts: bool
+                if true, will include all input tokens in the output
+                prediction tensor. otherwise only includes "predicted
+                spaces". Only applies if using freedom fwd. This is
+                useful to save a concatenation during the data
+                bootstrapping phase.
             prob_len: int or None
                 the index at which the problem is separated from
                 the solution. If none, it is found via torch indexing.
@@ -564,7 +571,8 @@ class LossWrapper(torch.nn.Module):
                 pad_mask=inpt_pad_mask[..., :plen],
                 is_causal=True,
                 tforce=tforce,
-                n_steps=tot_len-plen
+                n_steps=tot_len-plen,
+                incl_all_inpts=incl_all_inpts
             )
             #print("preds:", preds.shape)
             #print("Sep:", self.tokenizer.sep_idx)
@@ -614,7 +622,9 @@ class LossWrapper(torch.nn.Module):
         out_ids = data["output_ids"]
         inpt_mask = ~inpt_pad_mask.reshape(-1)
         out_mask =  ~out_pad_mask.reshape(-1)
-        ps = preds.reshape(-1, preds.shape[-1])[inpt_mask]
+        ps = preds[:,int(incl_all_inpts):].reshape(
+            -1, preds.shape[-1]
+        )[inpt_mask]
         labels = out_ids.reshape(-1)[out_mask]
         loss = self.loss_fxn(ps,labels)*self.loss_scale
         #try:
