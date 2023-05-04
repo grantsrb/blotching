@@ -53,8 +53,9 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         hyps["max_samples"] = 1000
         hyps["pre_epochs"] = 0
     hyps["init_samples"] = hyps.get(
-        "init_samples", hyps.get("max_samples",1000000)
+        "init_samples", hyps.get("max_samples",100000)
     )
+    if not hyps["init_samples"]:hyps["init_samples"]=hyps["max_samples"]
     data_cache = datas.get_data_cache(
         math_env,
         tokenizer,
