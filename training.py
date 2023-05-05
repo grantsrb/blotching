@@ -288,7 +288,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             val_loss = round(avg_loss/div, 5)
             val_acc = round(avg_acc/div, 5)
             val_correct = round(avg_correct/div, 5)
-            if rank==0 and verbose:
+
+            if verbose:
                 print()
                 s = "Example Predictions On Validation"
                 print(s)
@@ -333,20 +334,46 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
 
             keys = list(data.keys())
             for k in keys: del data[k]
-            optimizer.zero_grad()
-            if rank==0 and hyps.get( "save", True):
+
+        n_new_samps = 0
+        if hyps.get("star",False) and epoch > hyps.get("pre_epochs", 3):
+            if rank==0 and verbose:
+                print("Awaiting Runners")
+            # await_harvest does nothing until collectors are dispatched
+            collector.await_runners()
+            new_data = collector.harvest_exp()
+            n_new_samps = len(new_data)
+            if rank==0 and verbose:
+                try:
+                    print("New samples:", n_new_samps)
+                    print("Examples:")
+                    examps = tokenizer.decode(new_data[:5])
+                    for e,ex in enumerate(examps):
+                        print(e,"-",ex.replace(tokenizer.pad, ""))
+                except Exception as e:
+                    print(e)
+                    print("Issue viewing new samples")
+            data_cache.add_data(new_data)
+            if rank==0 and verbose:
+                print("Updating Runner Models")
+            # updates the collection model with the most recent weights
+            collector.update_model(model)
+
+        if rank==0 and epoch%val_mod==0:
+            if hyps.get( "save", True ):
                 save_dict = {
                     "mid_epoch": False,
-                    "epoch": epoch,
-                    "train_loss": train_loss,
-                    "train_acc":  train_acc,
-                    "val_loss":   val_loss,
-                    "val_acc":    val_acc,
-                    "val_correct":    val_correct,
-                    "state_dict": model.state_dict(),
-                    "optim_dict": optimizer.state_dict(),
-                    "hyps": hyps,
-                    "examples": examples,
+                    "epoch":       epoch,
+                    "train_loss":  train_loss,
+                    "train_acc":   train_acc,
+                    "val_loss":    val_loss,
+                    "val_acc":     val_acc,
+                    "val_correct": val_correct,
+                    "n_new_samps": n_new_samps,
+                    "state_dict":  model.state_dict(),
+                    "optim_dict":  optimizer.state_dict(),
+                    "hyps":        hyps,
+                    "examples":    examples,
                 }
                 ml_utils.save_io.save_checkpt(
                     save_dict=save_dict,
@@ -357,27 +384,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 )
                 save_training_log(hyps, logstr)
             scheduler.step(val_loss)
-        if hyps.get("star",False) and epoch > hyps.get("pre_epochs", 3):
-            if rank==0 and verbose:
-                print("Awaiting Runners")
-            # await_harvest does nothing until collectors are dispatched
-            collector.await_runners()
-            new_data = collector.harvest_exp()
-            if rank==0 and verbose:
-                try:
-                    print("New samples:", len(new_data))
-                    print("Examples:")
-                    examps = tokenizer.decode(new_data[:5])
-                    for e,ex in enumerate(examps):
-                        print(e,"-",ex)
-                except Exception as e:
-                    print(e)
-                    print("Issue viewing new samples")
-            data_cache.add_data(new_data)
-            if rank==0 and verbose:
-                print("Updating Runner Models")
-            # updates the collection model with the most recent weights
-            collector.update_model(model)
         keys = list(package.keys())
         for k in keys: del package[k]
         if hyps["exp_name"]=="test" and epoch==2: break
