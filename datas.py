@@ -3,6 +3,7 @@ import torch.multiprocessing as mp
 import envs
 import copy
 import numpy as np
+from tqdm import tqdm
 
 class DataIterable:
     def __init__(self, data, batch_size=128, meta_data=None):
@@ -804,6 +805,7 @@ def get_validation_set(
         tokenizer,
         max_len=100,
         batch_size=128,
+        rand_samps=None,
         *args, **kwargs
     ):
     """
@@ -825,6 +827,9 @@ def get_validation_set(
             if None, will default to init_samples
         batch_size: int
             the batch_size for the DataCache iterable
+        rand_samps: int or None
+            integer argument if you want to randomly sample n problems
+            rather than systematically looking at all possible problems.
     Returns:
         data_cache: DataCache
     """
@@ -832,18 +837,31 @@ def get_validation_set(
     solns = []
     labels = []
     max_soln_len = 0
-    for i in range(math_env.max_num+1):
-        print("Collecting", i)
-        for j in range(math_env.max_num+1):
-            for k in range(math_env.max_num+1):
-                probs.append( "{}+{}+{}".format(i,j,k) )
-                soln, labs = envs.MathEnv.find_soln(
-                    probs[-1],ret_labels=True
-                )
-                labels.append(tokenizer.sep.join(labs))
-                solns.append( tokenizer.sep + soln )
-                if len(solns[-1])>max_soln_len:
-                    max_soln_len = len(solns[-1])
+    if rand_samps:
+        for i in range(rand_samps):
+            prob = envs.MathEnv.sample_prob(
+                max_num=math_env.max_num,
+                max_ents=math_env.max_ents,
+                p_mult=math_env.p_mult,
+                space_mults=math_env.space_mults
+            )
+            probs.append(prob)
+    else:
+        probs = envs.MathEnv.recursive_probs(
+            prob="",
+            n_ents=math_env.max_ents,
+            max_num=math_env.max_num
+        )
+    print("Collecting Problem Solutions")
+    for prob in tqdm(probs):
+        soln, labs = envs.MathEnv.find_soln(
+            prob,ret_labels=True
+        )
+        labels.append(tokenizer.sep.join(labs))
+        solns.append( tokenizer.sep + soln )
+        if len(solns[-1])>max_soln_len:
+            max_soln_len = len(solns[-1])
+
     prob_ids = tokenizer(probs,
         as_tensor=True,
         max_len=math_env.prob_len,
@@ -852,7 +870,8 @@ def get_validation_set(
     )
     if max_len is None: slen = max_soln_len
     else: slen = max_len - math_env.prob_len
-    soln_ids = tokenizer(solns,
+    soln_ids = tokenizer(
+        solns,
         as_tensor=True,
         max_len=slen,
         pad=True,
