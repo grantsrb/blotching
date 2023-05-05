@@ -86,6 +86,8 @@ class MathEnv:
                        p_mult=0,
                        p_paren=0,
                        space_mults=True,
+                       zipf_order=0,
+                       p_ent=0.5,
                        *args, **kwargs):
         """
         Args:
@@ -107,13 +109,28 @@ class MathEnv:
             space_mults: bool
                 if true, will not allow more than two numbers to be
                 multiplied together
+            zipf_order: float
+                the exponent of a zipfian distribution by which to
+                sample each entity.
+            p_ent: float [0,1]
+                the probability of samping each entity beyond the first
+                two. There will always be at least two entities, but
+                beyond that, each entity has a p_ent chance of being
+                sampled at all. In the case that each entity fails to
+                be sampled, the resulting problem has fewer entities.
+                A value of 1 means each entity is guaranteed to be
+                sampled, a value of 0 is equivalent to setting the
+                max_ents to 2.
         """
         self.max_num = max_num
         self.max_ents = max_ents
         self.p_mult = p_mult
         self.p_paren = p_paren
-        self.space_mults = space_mults
         assert p_paren==0, "Parentheses are not yet implemented"
+        self.space_mults = space_mults
+        self.zipf_order = zipf_order
+        if p_ent is None: self.p_ent = (self.max_num-1)/self.max_num
+        else: self.p_ent = p_ent
         self.prob_len = (len(str(self.max_num))+1)*self.max_ents - 1
 
     def sample(self):
@@ -125,12 +142,16 @@ class MathEnv:
             max_ents=self.max_ents,
             p_mult=self.p_mult,
             space_mults=self.space_mults,
-            p_paren=self.p_paren
+            p_paren=self.p_paren,
+            zipf_order=self.zipf_order,
+            p_ent=self.p_ent
         )
 
     @staticmethod
     def sample_prob(max_num, max_ents=2, p_mult=0, space_mults=True,
-                                                   p_paren=0):
+                                                   p_paren=0,
+                                                   zipf_order=0,
+                                                   p_ent=0.5):
         """
         Args:
             max_num: int
@@ -151,6 +172,18 @@ class MathEnv:
                 the probability of sampling a parenthetical.
                 Parentheticals are sampled the same way as the initial
                 problem but with max entities equal to max_ents-1
+            zipf_order: float
+                the exponent of a zipfian distribution by which to sample
+                each entity from.
+            p_ent: float [0,1]
+                the probability of samping each entity beyond the first
+                two. There will always be at least two entities, but
+                beyond that, each entity has a p_ent chance of being
+                sampled at all. In the case that each entity fails to
+                be sampled, the resulting problem has fewer entities.
+                A value of 1 means each entity is guaranteed to be
+                sampled, a value of 0 is equivalent to setting the
+                max_ents to 2.
         Returns:
             prob: str
                 a string of a sampled arithmetic problem
@@ -159,14 +192,19 @@ class MathEnv:
         op = sum_sign
         for i in range(max_ents):
             # 50% prob of not including more terms
-            if i > 1 and np.random.random() > .5: continue
+            if i > 1 and np.random.random() < p_ent: continue
             if i > 0:
                 if space_mults and op==mult_sign: op = sum_sign
                 elif np.random.random()>p_mult:
                     op = sum_sign
                 else: op = mult_sign
                 prob.append(op)
-            ent = str(np.random.randint(0,max_num+1))
+            if zipf_order>0:
+                ent = str(int(zipfian(
+                    low=1,high=max_num+1,order=zipf_order
+                )))
+            else:
+                ent = str(np.random.randint(0,max_num+1))
             prob.append(ent)
             # Parentheticals
             if max_ents>2 and np.random.random()<p_paren:
@@ -469,6 +507,38 @@ class MathEnv:
         integers = sorted(ent.split(mult_sign), key=lambda x: int(x))
         return mult_sign.join(integers)
 
+    @staticmethod
+    def recursive_probs(prob="", n_ents=3, max_num=100, all_probs=[]):
+        """
+        Returns a list of problem strings ranging from 1+1 to
+        max_num+max_num+... for n_ents.
+
+        Args:
+            prob: str
+                the problem string so far.
+            n_ents: int
+                the number of entities remaining to handle.
+            max_num: int (inclusive)
+                the inclusive maximum value to include in the problem
+                generation.
+            all_probs: list
+                the list to be populated with new problem strings
+        Returns:
+            all_probs: list of str
+                all problem strings from 1+1 to max_num+max_num+...
+        """
+        if n_ents == 0:
+            return all_probs
+        for i in range(max_num+1):
+            if len(prob)>0:
+                new_prob = prob + sum_sign + str(i)
+                all_probs.append(new_prob)
+            else: new_prob = str(i)
+            all_probs = MathEnv.recursive_probs(
+                new_prob, n_ents-1, max_num, all_probs=all_probs
+            )
+        return all_probs
+
 def eval_prob(prob):
     """
     prob: str
@@ -484,62 +554,92 @@ def eval_prob(prob):
         ents.append(int(ent))
     return np.sum(ents)
 
+def zipfian(low=1, high=9, order=1, size=None):
+    """
+    Draws a single integer from low (inclusive) to high (inclusive) in
+    which the probability is proportional to 1/k^order.
+
+    Args:
+        low: int (inclusive)
+            the lowest possible value
+        high: int (exclusive)
+            one less than the highest possible value
+        order: float
+            the order of the exponent to weight the probability density
+            for each possible value.
+    Returns:
+        sample: int
+            returns a sample drawn from the zipfian distribution.
+    """
+    if low == high-1: return low
+    assert low < high-1 and low > 0
+    nums = np.arange(low, high)
+    probs = 1./(nums**order)
+    probs = probs/probs.sum()
+    samp = np.random.choice(nums, p=probs, size=size)
+    return samp
+
 
 if __name__=="__main__":
-    max_len = 0
-    min_len = 100
-    #prob = "5+7870+2130"
-    #soln = MathEnv.find_soln(prob)
-    #print("Soln:", soln)
-    
-    for i in range(1000):
-        prob = MathEnv.sample_prob(
-            max_num=10000,
-            max_ents=3,
-            p_mult=0,
-            space_mults=True
-        )
-        soln = MathEnv.find_soln(prob)
-        if "=00" in soln:
-            print()
-            print("Found issue:")
-            print("prob:", prob)
-            print("Soln:", soln)
-        try:
-            if len(soln) < min_len:
-                min_len = len(soln)
-                min_soln = soln
-            elif len(soln) > max_len:
-                max_len = len(soln)
-                max_soln = soln
-            #print(soln)
-            #print()
-            gtruth = eval_prob(prob)
-            splt2 = soln.split("=")[-1]
-            assert gtruth == int(splt2)
-        except:
-            print("gtr:", gtruth)
-            print("try:", splt2)
-            print(soln)
-            assert False
-    print("Min:",min_len)
-    print(min_soln)
-    print("Max:",max_len)
-    print(max_soln)
+    probs = MathEnv.recursive_probs(
+        "", 4, 5
+    )
+    for prob in probs:
+        print(prob)
+    #max_len = 0
+    #min_len = 100
+    ##prob = "5+7870+2130"
+    ##soln = MathEnv.find_soln(prob)
+    ##print("Soln:", soln)
+    #
+    #for i in range(1000):
+    #    prob = MathEnv.sample_prob(
+    #        max_num=10000,
+    #        max_ents=3,
+    #        p_mult=0,
+    #        space_mults=True
+    #    )
+    #    soln = MathEnv.find_soln(prob)
+    #    if "=00" in soln:
+    #        print()
+    #        print("Found issue:")
+    #        print("prob:", prob)
+    #        print("Soln:", soln)
+    #    try:
+    #        if len(soln) < min_len:
+    #            min_len = len(soln)
+    #            min_soln = soln
+    #        elif len(soln) > max_len:
+    #            max_len = len(soln)
+    #            max_soln = soln
+    #        #print(soln)
+    #        #print()
+    #        gtruth = eval_prob(prob)
+    #        splt2 = soln.split("=")[-1]
+    #        assert gtruth == int(splt2)
+    #    except:
+    #        print("gtr:", gtruth)
+    #        print("try:", splt2)
+    #        print(soln)
+    #        assert False
+    #print("Min:",min_len)
+    #print(min_soln)
+    #print("Max:",max_len)
+    #print(max_soln)
 
-    #prob = MathEnv.sample_prob(
-    #    max_num=20,
-    #    max_ents=3,
-    #    p_mult=0
-    #)
-    #soln = MathEnv.find_soln(prob)
-    #print("Soln:", soln)
-    #splt = [int(x) for x in prob.split("+")]
-    #splt2 = soln.split("=")[-1]
-    #print(splt)
-    #print(splt2)
-    #assert np.sum(splt) == int(splt2)
-    #print()
+    ##prob = MathEnv.sample_prob(
+    ##    max_num=20,
+    ##    max_ents=3,
+    ##    p_mult=0
+    ##)
+    ##soln = MathEnv.find_soln(prob)
+    ##print("Soln:", soln)
+    ##splt = [int(x) for x in prob.split("+")]
+    ##splt2 = soln.split("=")[-1]
+    ##print(splt)
+    ##print(splt2)
+    ##assert np.sum(splt) == int(splt2)
+    ##print()
 
 
 
