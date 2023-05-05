@@ -53,15 +53,16 @@ def get_stats(tokenizer, ids, remove_padding=True):
 if __name__=="__main__":
     rank = 0
     verbose = True
-    results_file = "model_results.csv"
-    abbrev_len = 1000
+    batch_size = 500
     bsize = None # Determines batch size of evaluation
     overwrite = False
     testing = False
     max_num = None # override the max_num given by the hyps
+    # integer argument if you want to randomly sample n problems rather
+    # than systematically looking at all possible problems.
+    rand_samps = 20000
 
-    if testing:
-        print("CURRENTLY IN TESTING MODE!!!!")
+    if testing: print("CURRENTLY IN TESTING MODE!!!!")
 
     model_folders = []
     for arg in sys.argv[1:]:
@@ -80,6 +81,12 @@ if __name__=="__main__":
             except:
                 print("Unrecognized arg", arg)
     if overwrite: print("Overwriting!!!")
+
+    if rand_samps:
+        results_file = "rand_results.csv"
+    else:
+        results_file = "model_results.csv"
+
     data_caches = {}
     for f,model_folder in enumerate(model_folders):
         csv_path = os.path.join(model_folder, results_file)
@@ -131,8 +138,9 @@ if __name__=="__main__":
             data_cache = datas.get_validation_set(
                 math_env,
                 tokenizer,
-                max_len=None,
-                batch_size=hyps["val_batch_size"]
+                max_len=hyps["seq_len"],
+                batch_size=batch_size,
+                rand_samps=rand_samps
             )
             data_caches[cache_tup] = data_cache
         if verbose and rank==0:
@@ -149,8 +157,9 @@ if __name__=="__main__":
             "label_str": [],
         }
         plen = data_cache.prob_len
-        if verbose and rank==0: print("Evaluating")
-        for i,data in tqdm(enumerate(data_cache)):
+        if verbose and rank==0: print("Evaluating Model")
+        n_loops = len(iter(data_cache))
+        for i,data in enumerate(data_cache):
             if "meta_data" in data:
                 meta_data = data["meta_data"]
             if not hyps["model_parallel"]:
@@ -194,6 +203,10 @@ if __name__=="__main__":
                 acc = acc.float().sum(-1)
                 acc = acc / (~out_pad_mask).sum(-1)
                 df_dict["tok_acc"].append(acc.cpu().data.numpy())
+                print(
+                    "{}%".format(int(i/n_loops*100)),
+                    end="               \r"
+                )
 
         df_dict["tok_acc"] = np.concatenate(df_dict["tok_acc"], axis=0)
         print("Making pandas dataframe")
