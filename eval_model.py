@@ -57,7 +57,8 @@ if __name__=="__main__":
     abbrev_len = 1000
     bsize = None # Determines batch size of evaluation
     overwrite = False
-    testing = True
+    testing = False
+    max_num = None # override the max_num given by the hyps
 
     if testing:
         print("CURRENTLY IN TESTING MODE!!!!")
@@ -118,7 +119,8 @@ if __name__=="__main__":
 
         # Make dataset
         if verbose and rank==0: print("Collecting Data")
-        if testing: math_env.max_num = 10
+        if max_num: math_env.max_num = max_num
+        elif testing: math_env.max_num = 10
         cache_tup = (
             math_env.max_num, math_env.max_ents, math_env.p_mult,
             math_env.p_paren, math_env.space_mults

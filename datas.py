@@ -48,9 +48,9 @@ class DataIterable:
             }
             if self.meta_data:
                 data["meta_data"] = {}
+                idxs = self.perm[strt:end].cpu().data.numpy()
                 for k in self.meta_data:
-                    d = self.meta_data[k][self.perm[strt:end]]
-                    data["meta_data"][k] = d
+                    data["meta_data"][k] = self.meta_data[k][idxs]
             return data
         raise StopIteration
 
@@ -82,6 +82,8 @@ class DataCache(torch.utils.data.Dataset):
             meta data corresponding to each row in the data
         """
         self.batch_size = batch_size
+        if not max_samples and init_data is not None:
+            max_samples = len(init_data)
         self.cache = torch.zeros(max_samples, seq_len)
         if dtype=="long": self.cache = self.cache.long()
         self.is_full = False
@@ -180,7 +182,7 @@ class DataCache(torch.utils.data.Dataset):
 
 class Tokenizer:
     @staticmethod
-    def get_tokenizer(digit_embs=True, max_num=1000):
+    def get_tokenizer(digit_embs=True, max_num=1000, *args, **kwargs):
         """
         Creates and returns a tokenizer object.
     
@@ -831,13 +833,14 @@ def get_validation_set(
     labels = []
     max_soln_len = 0
     for i in range(math_env.max_num+1):
+        print("Collecting", i)
         for j in range(math_env.max_num+1):
             for k in range(math_env.max_num+1):
                 probs.append( "{}+{}+{}".format(i,j,k) )
                 soln, labs = envs.MathEnv.find_soln(
                     probs[-1],ret_labels=True
                 )
-                labels.append(labs)
+                labels.append(tokenizer.sep.join(labs))
                 solns.append( tokenizer.sep + soln )
                 if len(solns[-1])>max_soln_len:
                     max_soln_len = len(solns[-1])
@@ -859,15 +862,15 @@ def get_validation_set(
     data = torch.cat([prob_ids, soln_ids], dim=1)
     seq_len = data.shape[-1]
     data_cache = DataCache(
-        max_samples=max_samples,
+        max_samples=len(data),
         seq_len=seq_len,
         batch_size=batch_size,
         init_data=data,
         prob_len=prob_len,
         meta_data={
-            "labels": labels,
-            "probs": probs,
-            "solns": solns
+            "labels": np.asarray(labels, dtype="object"),
+            "probs":  np.asarray(probs, dtype="object"),
+            "solns":  np.asarray(solns, dtype="object")
         }
     )
     return data_cache
