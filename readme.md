@@ -48,6 +48,22 @@ then running the following command:
         This will not use the hyperparameters from the argued checkpt,
         just the model weights.
 
+    "max_samples": int or null
+        the maximum number of data samples in the data cache. if null
+        defaults to `init_samples`. `max_samples` or `init_samples`
+        must be not null.
+    "init_samples": int or null
+        the initialization quantity of data samples. If null, defaults
+        to `max_samples`. `max_samples` or `init_samples` must be not
+        null.
+    "val_samples": int
+        the number of validation samples
+    "val_mod": int
+        the number of training loops to perform per validation. i.e.
+        a value of 3 means there will be 3 training updates for every
+        validation
+
+
     "star": bool
         if true, will use model to sample new data that is selected
         for correctness and brevity
@@ -68,6 +84,37 @@ then running the following command:
     "checkpt_mod": int or None
         during training, the model will be saved every `checkpt_mod`
         iterations
+
+    "max_num": int
+        the maximum number available for sampling the initial
+        problem (inclusive)
+    "max_ents": int
+        maximum entities for the starting problem. If using
+        parentheticals, a parenthetical counts as one entity,
+        parentheticals are recursively samples with max_ents-1
+        max entities.
+    "p_mult": float [0,1]
+        the probability of sampling a multiplication sign for
+        the starting problem
+    "p_paren": float [0,1]
+        the probability of sampling a parenthetical.
+        Parentheticals are sampled the same way as the initial
+        problem but with max entities equal to max_ents-1
+    "space_mults": bool
+        if true, will not allow more than two numbers to be
+        multiplied together
+    "zipf_order": float
+        the exponent of a zipfian distribution by which to
+        sample each entity.
+    "p_ent": float [0,1]
+        the probability of samping each entity beyond the first
+        two. There will always be at least two entities, but
+        beyond that, each entity has a p_ent chance of being
+        sampled at all. In the case that each entity fails to
+        be sampled, the resulting problem has fewer entities.
+        A value of 1 means each entity is guaranteed to be
+        sampled, a value of 0 is equivalent to setting the
+        max_ents to 2.
 
     "n_epochs": int
         the total number of training iterations
