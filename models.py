@@ -656,6 +656,7 @@ class LossWrapper(torch.nn.Module):
         # happen
         out_ends[out_ends==0] = out_ends.shape[-1]-1 
         pred_ids = preds[:,int(incl_all_inpts):].argmax(-1)
+        pred_ids[:,-1] = eos_idx
         pred_ends = torch.argmax( (pred_ids==eos_idx).long(), dim=-1 )
         diffs = (out_ends-pred_ends).float()
         ret_dict["len_diff"] = diffs.mean()
