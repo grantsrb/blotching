@@ -108,6 +108,9 @@ then running the following command:
     "p_mult": float [0,1]
         the probability of sampling a multiplication sign for
         the starting problem
+    "max_mult_num": int
+        the maximum values that can be included in a multiplication
+        operation
     "p_paren": float [0,1]
         the probability of sampling a parenthetical.
         Parentheticals are sampled the same way as the initial

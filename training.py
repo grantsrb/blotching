@@ -37,7 +37,15 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     # Establish math environment parameters
     math_env = MathEnv(**hyps)
     if hyps["p_mult"]>0:
-        hyps["max_val"] = math_env.max_num**math_env.max_ents
+        max_num = math_env.max_num
+        max_ents = math_env.max_ents
+        mmn = math_env.max_mult_num
+        space = math_env.space_mults
+        hyps["max_val"] = max(
+          mmn**(max_ents-space*(max_ents//3))+space*(max_ents//3)*max_num,
+          max_num*max_ents
+        )
+        print("Max Value:", hyps["max_val"])
     else:
         hyps["max_val"] = math_env.max_ents*math_env.max_num
 

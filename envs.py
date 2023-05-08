@@ -86,6 +86,7 @@ class MathEnv:
                        p_mult=0,
                        p_paren=0,
                        space_mults=True,
+                       max_mult_num=10,
                        zipf_order=0,
                        p_ent=0.5,
                        *args, **kwargs):
@@ -121,10 +122,20 @@ class MathEnv:
                 A value of 1 means each entity is guaranteed to be
                 sampled, a value of 0 is equivalent to setting the
                 max_ents to 2.
+            max_mult_num: int
+                the maximum value to be multiplied with. This applies
+                to only one of the two numbers involved in the
+                multiplication. For example, in x*y, if x is sampled
+                and happens to be larger than max_mult_num, then y
+                will be sampled from the range [0, max_mul_num]. If
+                x happens to be sampled as less than or equal to
+                max_mult_num, then y will be sampled from [0,max_num]
         """
         self.max_num = max_num
         self.max_ents = max_ents
         self.p_mult = p_mult
+        self.max_mult_num = max_mult_num
+        if max_mult_num is None: self.max_mult_num = self.max_num
         self.p_paren = p_paren
         assert p_paren==0, "Parentheses are not yet implemented"
         self.space_mults = space_mults
@@ -134,8 +145,8 @@ class MathEnv:
         self.max_prob = self.get_max_prob()
         print("Max Prob:", self.max_prob)
         self.prob_len = len(self.max_prob)
-        self.max_soln = self.get_max_soln()
-        print("Max Soln:", self.max_soln)
+        prob,self.max_soln = self.get_max_soln()
+        print("Max Soln:", prob + "=" + self.max_soln)
         print(
             "WARNING: It's potentially possible that this isn't the"+\
             " maximum length solution.."
@@ -151,17 +162,9 @@ class MathEnv:
             max_prob: str
                 the maximum length problem in terms of characters
         """
-        max_prob = ""
-        if self.p_mult>0:
-            for i in range(self.max_ents):
-                max_prob += str(self.max_num)
-                if max_prob[-1]==mult_sign and self.space_mults:
-                    max_prob += sum_sign
-                else: max_prob += mult_sign
-        else:
-            max_prob = sum_sign.join(
-                [str(self.max_num) for _ in range(self.max_ents)]
-            )
+        max_prob = sum_sign.join(
+            [str(self.max_num) for _ in range(self.max_ents)]
+        )
         return max_prob
 
     def get_max_soln(self):
@@ -173,22 +176,35 @@ class MathEnv:
             max_soln: str
                 the maximum length problem in terms of characters
         """
-        ent = "".join(["9" for _ in range(len(str(self.max_num))-1)])
-        prob = ""
-        if self.p_mult>0:
-            for i in range(self.max_ents):
-                prob += ent
-                if prob[-1]==mult_sign and self.space_mults:
-                    prob += sum_sign
-                else: prob += mult_sign
-            prob = prob[:-1] # Remove the last math sign
-        else:
-            prob = sum_sign.join(
-                [ent for _ in range(self.max_ents)]
-            )
-            
+        ent = int("".join(["9" for _ in range(len(str(self.max_num))-1)]))
+        prob = sum_sign.join(
+            [str(ent) for _ in range(self.max_ents)]
+        )
         soln = MathEnv.find_soln(prob)
-        return soln
+        if self.p_mult>0:
+            mult_prob = []
+            mmn = self.max_mult_num
+            if mmn%10==0: mmn = mmn-1
+            mult_ent = int("".join([
+              str(mmn) for _ in range(max(len(str(self.max_mult_num))-1,1))
+            ]))
+            mult_prob.append(mult_ent)
+            i = 1
+            while i < self.max_ents:
+                mult_prob.append(mult_sign)
+                mult_prob.append(mult_ent)
+                i += 1
+                if i >= self.max_ents: break
+                if mult_prob[-2]==mult_sign and self.space_mults:
+                    mult_prob.append(sum_sign)
+                    mult_prob.append(ent)
+                    i+=1
+            mult_prob = "".join([str(p) for p in mult_prob])
+            mult_soln = MathEnv.find_soln(mult_prob)
+            if len(mult_soln)>len(soln):
+                soln = mult_soln
+                prob = mult_prob
+        return prob,soln
 
     def sample(self):
         """
@@ -201,13 +217,15 @@ class MathEnv:
             space_mults=self.space_mults,
             p_paren=self.p_paren,
             zipf_order=self.zipf_order,
-            p_ent=self.p_ent
+            p_ent=self.p_ent,
+            max_mult_num=self.max_mult_num,
         )
 
     @staticmethod
     def sample_prob(max_num, max_ents=2, p_mult=0, space_mults=True,
                                                    p_paren=0,
                                                    zipf_order=0,
+                                                   max_mult_num=None,
                                                    p_ent=0.5):
         """
         Args:
@@ -241,28 +259,54 @@ class MathEnv:
                 A value of 1 means each entity is guaranteed to be
                 sampled, a value of 0 is equivalent to setting the
                 max_ents to 2.
+            max_mult_num: int
+                the maximum value to be multiplied with. This applies
+                to only one of the two numbers involved in the
+                multiplication. For example, in x*y, if x is sampled
+                and happens to be larger than max_mult_num, then y
+                will be sampled from the range [0, max_mul_num]. If
+                x happens to be sampled as less than or equal to
+                max_mult_num, then y will be sampled from [0,max_num]
         Returns:
             prob: str
                 a string of a sampled arithmetic problem
         """
         prob = []
         op = sum_sign
+        high_num = max_num
+        if max_mult_num is None: max_mult_num = max_num
+        break_i = max_ents
         for i in range(max_ents):
             # 50% prob of not including more terms
             if i > 1 and np.random.random() < p_ent: continue
             if i > 0:
+                high_num = max_num
                 if space_mults and op==mult_sign: op = sum_sign
                 elif np.random.random()>p_mult:
                     op = sum_sign
-                else: op = mult_sign
+                else:
+                    op = mult_sign
+                    high_num = max_mult_num
                 prob.append(op)
             if zipf_order>0:
-                ent = str(int(zipfian(
-                    low=1,high=max_num+1,order=zipf_order
-                )))
+                ent = int(zipfian(
+                    low=1,high=high_num+1,order=zipf_order
+                ))
+                if op == mult_sign:
+                    prob[-2] = ent
+                    ent = int(zipfian(
+                        low=1,high=high_num+1,order=zipf_order
+                    ))
             else:
-                ent = str(np.random.randint(0,max_num+1))
+                ent = np.random.randint(0,high_num+1)
+                if op == mult_sign:
+                    prob[-2] = ent
+                    ent = np.random.randint(0,high_num+1)
             prob.append(ent)
+            # 50% chance to flip multiplication entities to try to
+            # reduce bias of sampling.
+            if op==mult_sign and np.random.random()>0.5:
+                prob[-3],prob[-1] = prob[-1], prob[-3]
             # Parentheticals
             if max_ents>2 and np.random.random()<p_paren:
                 raise NotImplemented
@@ -272,7 +316,7 @@ class MathEnv:
                     p_mult=p_mult,
                     p_paren=p_paren
                 ))
-        return "".join(prob)
+        return "".join([str(p) for p in prob])
 
     @staticmethod
     def entity_sort_key(entity):
@@ -519,10 +563,12 @@ class MathEnv:
         if max_mag is None:
             keys = set(ent_dict.keys())
             keys.remove("mults")
-            max_mag = max(keys)
-        keys = np.arange(max_mag+1)
-        for k in keys:
-            if k in ent_dict and k != "mults": ents += ent_dict[k]
+            if len(keys)>0:
+                max_mag = max(keys)
+        if max_mag is not None:
+            keys = np.arange(max_mag+1)
+            for k in keys:
+                if k in ent_dict and k != "mults": ents += ent_dict[k]
         return sum_sign.join(ents)
 
     @staticmethod
@@ -654,62 +700,84 @@ if __name__=="__main__":
     #    print(prob)
     #    soln = MathEnv.find_soln(prob)
     #    print("Soln:", soln)
-    max_len = 0
-    min_len = 100
-    for i in range(1000):
-        prob = MathEnv.sample_prob(
-            max_num=10000,
+    math_env = MathEnv(
+            max_num=100,
             max_ents=3,
-            p_mult=0,
-            space_mults=True
-        )
-        soln = MathEnv.find_soln(prob)
-        if "=00" in soln:
-            print()
-            print("Found issue:")
-            print("prob:", prob)
-            print("Soln:", soln)
-        try:
-            if len(soln) < min_len:
-                min_len = len(soln)
-                min_soln = soln
-                min_prob = prob
-            elif len(soln) > max_len:
-                max_len = len(soln)
-                max_soln = soln
-                max_prob = prob
-            #print(soln)
-            #print()
-            gtruth = eval_prob(prob)
-            splt = soln.split("=")
-            for s in splt:
-                assert gtruth == eval_prob(s)
-        except:
-            print("gtr:", gtruth)
-            print("try:", splt2)
-            print(soln)
-            assert False
-    print("Min:",min_len)
-    print("prob:", min_prob)
-    print("soln:", min_soln)
-    print()
-    print("Max:",max_len)
-    print("prob:", max_prob)
-    print("soln:", max_soln)
-
-    ##prob = MathEnv.sample_prob(
-    ##    max_num=20,
-    ##    max_ents=3,
-    ##    p_mult=0
-    ##)
-    ##soln = MathEnv.find_soln(prob)
-    ##print("Soln:", soln)
-    ##splt = [int(x) for x in prob.split("+")]
-    ##splt2 = soln.split("=")[-1]
-    ##print(splt)
-    ##print(splt2)
-    ##assert np.sum(splt) == int(splt2)
+            p_mult=0.5,
+            p_paren=0,
+            space_mults=True,
+            max_mult_num=6,
+            zipf_order=0,
+            p_ent=0.5,
+    )
+    #max_len = 0
+    #min_len = 100
+    #prob_hist = collections.defaultdict(lambda: 0)
+    #for i in range(1000):
+    #    prob = MathEnv.sample_prob(
+    #        max_num=100,
+    #        max_ents=3,
+    #        p_mult=0.25,
+    #        space_mults=True,
+    #        max_mult_num=5
+    #    )
+    #    if "*" in prob:
+    #        splt = prob.split(sum_sign)
+    #        for s in splt:
+    #            prob_hist[s] += 1
+    #    soln = MathEnv.find_soln(prob)
+    #    if "=00" in soln:
+    #        print()
+    #        print("Found issue:")
+    #        print("prob:", prob)
+    #        print("Soln:", soln)
+    #    try:
+    #        if len(soln) < min_len:
+    #            min_len = len(soln)
+    #            min_soln = soln
+    #            min_prob = prob
+    #        elif len(soln) > max_len:
+    #            max_len = len(soln)
+    #            max_soln = soln
+    #            max_prob = prob
+    #        #print(soln)
+    #        #print()
+    #        gtruth = eval_prob(prob)
+    #        splt = soln.split("=")
+    #        for s in splt:
+    #            assert gtruth == eval_prob(s)
+    #    except:
+    #        print("gtr:", gtruth)
+    #        print("try:", splt2)
+    #        print(soln)
+    #        assert False
+    #print("Min:",min_len)
+    #print("prob:", min_prob)
+    #print("soln:", min_soln)
+    #print()
+    #print("Max:",max_len)
+    #print("prob:", max_prob)
+    #print("soln:", max_soln)
     ##print()
+    ##print("Hist:")
+    ##keys = sorted(list(prob_hist.keys()))
+    ##for k in keys:
+    ##    print("\t{}: {}".format(k,prob_hist[k]))
+
+    ###prob = MathEnv.sample_prob(
+    ###    max_num=20,
+    ###    max_ents=3,
+    ###    p_mult=0.5,
+    ###    max_mult_num=10,
+    ###)
+    ###soln = MathEnv.find_soln(prob)
+    ###print("Soln:", soln)
+    ###splt = [int(x) for x in prob.split("+")]
+    ###splt2 = soln.split("=")[-1]
+    ###print(splt)
+    ###print(splt2)
+    ###assert np.sum(splt) == int(splt2)
+    ###print()
 
 
 
