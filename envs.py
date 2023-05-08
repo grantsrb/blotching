@@ -287,7 +287,6 @@ class MathEnv:
             statements.append(statement)
             labels.append(REARRANGE)
 
-
         # Decompose Multiplication Terms
         loop = 0
         while len(ent_dict["mults"])>0:
@@ -323,8 +322,18 @@ class MathEnv:
             return "=".join(statements)
 
         # Progressively decompose into ones, tens, 100s, ...
+        # but only when there are multiple of a particular magnitude.
         max_mag = len(str(eval_prob(statement)))
         for mag in range(1, max_mag):
+            # First Check if decomposition is needed
+            n_frags = len(ent_dict[mag])
+            for j in range(mag+1,max_mag+1):
+                if j in ent_dict:
+                    for k,ent in enumerate(ent_dict[j]):
+                        if ent[-mag] != "0":
+                            n_frags += 1
+            if n_frags <= 1: continue
+
             for j in range(mag+1,max_mag+1):
                 if j in ent_dict:
                     for k,ent in enumerate(ent_dict[j]):
@@ -581,51 +590,55 @@ def zipfian(low=1, high=9, order=1, size=None):
 
 
 if __name__=="__main__":
-    probs = MathEnv.recursive_probs(
-        "", 4, 5
-    )
-    for prob in probs:
-        print(prob)
-    #max_len = 0
-    #min_len = 100
-    ##prob = "5+7870+2130"
-    ##soln = MathEnv.find_soln(prob)
-    ##print("Soln:", soln)
-    #
-    #for i in range(1000):
-    #    prob = MathEnv.sample_prob(
-    #        max_num=10000,
-    #        max_ents=3,
-    #        p_mult=0,
-    #        space_mults=True
-    #    )
+    #probs = MathEnv.recursive_probs(
+    #    "", 4, 5
+    #)
+    #for prob in probs:
+    #    print(prob)
     #    soln = MathEnv.find_soln(prob)
-    #    if "=00" in soln:
-    #        print()
-    #        print("Found issue:")
-    #        print("prob:", prob)
-    #        print("Soln:", soln)
-    #    try:
-    #        if len(soln) < min_len:
-    #            min_len = len(soln)
-    #            min_soln = soln
-    #        elif len(soln) > max_len:
-    #            max_len = len(soln)
-    #            max_soln = soln
-    #        #print(soln)
-    #        #print()
-    #        gtruth = eval_prob(prob)
-    #        splt2 = soln.split("=")[-1]
-    #        assert gtruth == int(splt2)
-    #    except:
-    #        print("gtr:", gtruth)
-    #        print("try:", splt2)
-    #        print(soln)
-    #        assert False
-    #print("Min:",min_len)
-    #print(min_soln)
-    #print("Max:",max_len)
-    #print(max_soln)
+    #    print("Soln:", soln)
+    max_len = 0
+    min_len = 100
+    for i in range(1000):
+        prob = MathEnv.sample_prob(
+            max_num=10000,
+            max_ents=3,
+            p_mult=0,
+            space_mults=True
+        )
+        soln = MathEnv.find_soln(prob)
+        if "=00" in soln:
+            print()
+            print("Found issue:")
+            print("prob:", prob)
+            print("Soln:", soln)
+        try:
+            if len(soln) < min_len:
+                min_len = len(soln)
+                min_soln = soln
+                min_prob = prob
+            elif len(soln) > max_len:
+                max_len = len(soln)
+                max_soln = soln
+                max_prob = prob
+            #print(soln)
+            #print()
+            gtruth = eval_prob(prob)
+            splt = soln.split("=")
+            for s in splt:
+                assert gtruth == eval_prob(s)
+        except:
+            print("gtr:", gtruth)
+            print("try:", splt2)
+            print(soln)
+            assert False
+    print("Min:",min_len)
+    print("prob:", min_prob)
+    print("soln:", min_soln)
+    print()
+    print("Max:",max_len)
+    print("prob:", max_prob)
+    print("soln:", max_soln)
 
     ##prob = MathEnv.sample_prob(
     ##    max_num=20,
