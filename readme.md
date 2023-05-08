@@ -63,6 +63,18 @@ then running the following command:
         a value of 3 means there will be 3 training updates for every
         validation
 
+    "aug_loops": int
+        if greater than 0, will use the model to augment samples in the
+        training data. Augmentations are only kept when the final answer
+        is correct and the total answer is shorter than the original.
+        The value of this parameter indicates the number of augmentation
+        loops to perform after each epoch. Each loop attempts to augment
+        `val_batch_size` uniformly sampled data points from the existing
+        data.
+    "in_place": bool
+        if true, the augmentations will replace the existing examples.
+        if false, the augmentations will be added to the existing
+        dataset.
 
     "star": bool
         if true, will use model to sample new data that is selected

@@ -36,6 +36,10 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
 
     # Establish math environment parameters
     math_env = MathEnv(**hyps)
+    if hyps["p_mult"]>0:
+        hyps["max_val"] = math_env.max_num**math_env.max_ents
+    else:
+        hyps["max_val"] = math_env.max_ents*math_env.max_num
 
     # Make Tokenizer
     max_num = hyps.get("max_num", 20)**hyps.get("max_ents", 2)
@@ -129,7 +133,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     if rank==0 and verbose: print("Beginning Training")
     for epoch in range(n_epochs):
         # If enough training, asynchronously sample new data using model
-        if hyps.get("star",False) and epoch > hyps.get("pre_epochs", 3):
+        if hyps.get("star",False) and epoch>=hyps.get("pre_epochs", 3):
             if rank==0 and verbose: print("Dispatching Runners")
             collector.dispatch_runners()
 
@@ -336,7 +340,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             for k in keys: del data[k]
 
         n_new_samps = 0
-        if hyps.get("star",False) and epoch > hyps.get("pre_epochs", 3):
+        if hyps.get("star",False) and epoch>=hyps.get("pre_epochs", 3):
             if rank==0 and verbose:
                 print("Awaiting Runners")
             # await_harvest does nothing until collectors are dispatched
@@ -346,10 +350,11 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             if rank==0 and verbose:
                 try:
                     print("New samples:", n_new_samps)
-                    print("Examples:")
-                    examps = tokenizer.decode(new_data[:5])
-                    for e,ex in enumerate(examps):
-                        print(e,"-",ex.replace(tokenizer.pad, ""))
+                    if n_new_samps>0:
+                        print("Examples:")
+                        examps = tokenizer.decode(new_data[:5])
+                        for e,ex in enumerate(examps):
+                            print(e,"-",ex.replace(tokenizer.pad, ""))
                 except Exception as e:
                     print(e)
                     print("Issue viewing new samples")
@@ -358,6 +363,33 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 print("Updating Runner Models")
             # updates the collection model with the most recent weights
             collector.update_model(model)
+
+        n_aug_samps = 0
+        if hyps.get("aug_loops",0)>0 and epoch>=hyps.get("pre_epochs",3):
+            print("Augmenting Dataset")
+            aug_samps = datas.augment_data(
+                hyps=hyps,
+                model=model,
+                data_cache=data_cache,
+                tokenizer=tokenizer,
+                in_place=True
+            )
+            n_aug_samps = sum([len(x) for x in aug_samps])
+            if rank==0 and verbose:
+                try:
+                    print("Augmented samples:", n_aug_samps)
+                    if n_aug_samps>0:
+                        print("Examples:")
+                        examps = tokenizer.decode(aug_samps[0][:5])
+                        print("With Padding")
+                        for e,ex in enumerate(examps):
+                            print(e,"-",ex)
+                        print("Without Padding")
+                        for e,ex in enumerate(examps):
+                            print(e,"-",ex.replace(tokenizer.pad, ""))
+                except Exception as e:
+                    print(e)
+                    print("Issue viewing new samples")
 
         if rank==0 and epoch%val_mod==0:
             if hyps.get( "save", True ):
@@ -370,6 +402,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     "val_acc":     val_acc,
                     "val_correct": val_correct,
                     "n_new_samps": n_new_samps,
+                    "n_aug_samps": n_aug_samps,
                     "state_dict":  model.state_dict(),
                     "optim_dict":  optimizer.state_dict(),
                     "hyps":        hyps,

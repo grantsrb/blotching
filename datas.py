@@ -145,6 +145,10 @@ class DataCache(torch.utils.data.Dataset):
         if self.is_full: return self.cache.shape[0]
         return self.idx
 
+    @property
+    def shape(self):
+        return self.cache.shape
+
     def __getitem__(self, idx):
         """
         Returns a single data sample
@@ -155,13 +159,39 @@ class DataCache(torch.utils.data.Dataset):
             sample: torch tensor (1, seq_len)
         """
         data = {
-            "input_indices": self.cache[idx:idx+1,:-1],
-            "output_indices": self.cache[idx:idx+1,1:],
+            "input_ids": self.cache[idx:idx+1,:-1],
+            "output_ids": self.cache[idx:idx+1,1:],
         }
         if self.meta_data:
             data["meta_data"] = {}
             for k in self.meta_data:
                 d = self.meta_data[k][idx:idx+1]
+                data["meta_data"][k] = d
+        return data
+
+    def slice(self, idx, endx):
+        """
+        Returns a single data sample
+
+        Args:
+            idx: int
+                the starting index for the slice
+            endx: int
+                the ending index not inclusive
+        Returns:
+            sample: torch tensor (endx-idx, seq_len)
+        """
+        if idx>self.idx and not self.is_full: raise Exception
+        elif endx>self.idx and not self.is_full:
+            endx = self.idx
+        data = {
+            "input_ids": self.cache[idx:endx,:-1],
+            "output_ids": self.cache[idx:endx,1:],
+        }
+        if self.meta_data:
+            data["meta_data"] = {}
+            for k in self.meta_data:
+                d = self.meta_data[k][idx:endx]
                 data["meta_data"][k] = d
         return data
 
@@ -695,6 +725,119 @@ class Runner:
                             idx = plen+ends[i]+1
                             preds[i,idx:] = self.tokenizer.pad_idx
                 self.shared_exp[startx:endx,:] = preds
+
+def augment_data(
+        hyps,
+        model,
+        data_cache,
+        tokenizer,
+        in_place=False,
+        verbose=True
+    ):
+    """
+    Takes the data from the data cache and creates augmentations by
+    using the model to predict the sequence. Only stores/changes
+    samples that are correct and shorter than before.
+
+    Args:
+        hyps: dict
+            val_batch_size: int
+                the batch size for the augmentation loop
+            aug_loops: int
+                the number of augmentation loops to perform
+        model: torch Module
+        data_cache: DataCache
+        tokenizer: Tokenizer
+        in_place: bool
+            if true, will change samples in place, replacing them
+            within the data cache. If False, will not replace in
+            place but will still return a copy of the augmented samples.
+    Returns:
+        aug_data: list of torch tensor [(A,S), (A1,S), ...]
+            a list of variable length tensors that are the augmented
+            samples.
+    """
+    bsize = hyps.get("val_batch_size", 500)
+    aug_loops = hyps.get("aug_loops", 3)
+    plen = data_cache.prob_len
+    device = model.get_device()
+    pad = tokenizer.pad_idx
+    eos = tokenizer.eos_idx
+    sep = tokenizer.sep_idx
+    ans_len = len(str(hyps["max_val"]))
+    aug_data = []
+    # Aranges will help with indexing for padding and other things
+    aranges = torch.arange(data_cache.shape[1])[None].repeat(
+        (bsize, 1)
+    ).to(device)
+    with torch.no_grad():
+        perm = torch.randperm(len(data_cache)).long()
+        rng = range(min(aug_loops, len(data_cache)//bsize))
+        if verbose: rng = tqdm(rng)
+        for i in rng:
+            startx = i*bsize
+            endx = startx+bsize
+            permxs = perm[startx:endx] # Used later in the in_place op
+            data = data_cache.cache[permxs]
+            inpts = data[:,:-1]
+            pad_mask = inpts==pad
+            outputs = data[:,1:].to(model.get_device())
+
+            logits = model(
+                inpts[:,:plen+1].to(device),
+                pad_mask=pad_mask[:,:plen+1].to(device),
+                is_causal=True,
+                tforce=False,
+                # -2 for the plen+1 in inpts and inclusion of all inpts
+                n_steps=data_cache.shape[1]-plen-2,
+                temperature=hyps.get("temperature", 1),
+                incl_all_inpts=True,
+            )
+            preds = torch.argmax(logits, dim=-1)
+            if hyps["exp_name"] == "test": 
+                preds[:,1:] = outputs.clone()
+
+            preds[:,-1] = eos
+
+            pred_ends = torch.argmax( (preds==eos).long(), dim=-1 )
+            soln_ends = torch.argmax( (outputs==eos).long(),dim=-1 )
+            shorts = ((soln_ends+1-pred_ends)>0)&(pred_ends>0)
+
+            if hyps["exp_name"] == "test": 
+                shorts[:5] = True
+
+            if len(aranges)!=len(preds):
+                aranges = aranges[:len(preds)]
+            pad_idxs = aranges>pred_ends[:,None]
+            preds[pad_idxs] = pad
+
+            # Find last separator and eos to determine window of answer.
+            # Then use sum of matching tokens to determine if correct.
+            seps = outputs==sep
+            last_sep_idxs = torch.argsort(
+                seps.long(), dim=-1, descending=True
+            )[torch.arange(len(seps)).long(), seps.sum(-1).long()-1]
+            soln_ends = soln_ends[:,None]
+            soln_lens = soln_ends - last_sep_idxs[:,None]
+            soln_idxs =(aranges<soln_ends)&(aranges>=(soln_ends-soln_lens))
+            ans_idxs = (aranges < pred_ends[:,None])&\
+                       (aranges>=(pred_ends[:,None]-soln_lens))
+            corrects = torch.zeros_like(outputs).float()
+            idx = preds[ans_idxs]==outputs[soln_idxs[:,:-1]]
+            corrects[soln_idxs[:,:-1]] = (idx).float()
+            corrects = corrects.sum(-1)
+            corrects = corrects.squeeze()==soln_lens.squeeze()
+            idx = shorts&corrects
+            p = preds[idx].data.cpu()
+
+            # Add data to list, and cache if in_place
+            if len(p) > 0:
+                aug_data.append(p)
+                if in_place:
+                    idx = idx.cpu()
+                    data_cache.cache[permxs[idx], :] = p
+    return aug_data
+
 
 def sample_data(math_env,
                 tokenizer,
