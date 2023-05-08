@@ -150,6 +150,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         ddp_model.train()
         avg_loss = 0
         avg_acc = 0
+        avg_len_diff = 0
+        avg_len_perc = 0
         iterable = iter(data_cache)
         nloops = hyps.get("n_train_loops", None)
         nloops = len(iterable) if nloops is None else nloops
@@ -172,9 +174,13 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             )
             loss = package["loss"]
             acc = package["acc"]
+            len_diff = package["len_diff"]
+            len_perc = package["len_percent"]
 
             avg_acc += acc.item()
             avg_loss += loss.item()
+            avg_len_diff += len_diff.item()
+            avg_len_perc += len_perc.item()
 
             if i%hyps["n_grad_loops"]==0 or i==len(data_cache)-1:
                 if hyps.get("grad_scaling",False):
@@ -201,11 +207,15 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 if hyps.get( "save", True):
                     train_loss = round(avg_loss/i, 5)
                     train_acc = round(avg_acc/i, 5)
+                    train_len_diff = round(avg_len_diff/i,5)
+                    train_len_perc = round(avg_len_perc/i,5)
                     save_dict = {
                         "mid_epoch": True,
                         "epoch": epoch,
                         "train_loss": train_loss,
                         "train_acc":  train_acc,
+                        "train_len_diff":  train_len_diff,
+                        "train_len_perc":  train_len_perc,
                         "val_loss": None,
                         "val_acc":  None,
                         "state_dict": model.state_dict(),
@@ -224,6 +234,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         div = (i+1)
         train_loss = round(avg_loss/div, 5)
         train_acc  = round(avg_acc/div, 5)
+        train_len_diff = round(avg_len_diff/i,5)
+        train_len_perc = round(avg_len_perc/i,5)
         if rank==0 and verbose:
             print()
             s = "Example Predictions On Training"
@@ -247,6 +259,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         #############################################################
         avg_loss = 0
         avg_acc = 0
+        avg_len_diff = 0
+        avg_len_perc = 0
         avg_correct = 0
         if rank==0 and epoch%val_mod==0:
             ddp_model.eval()
@@ -271,6 +285,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     )
                     loss = package["loss"]
                     acc = package["acc"]
+                    len_diff = package["len_diff"]
+                    len_perc = package["len_percent"]
                     preds = package["preds"]
 
                     corrects = check_correct(
@@ -282,15 +298,19 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
 
                     avg_loss += loss.item()
                     avg_acc += acc.item()
+                    avg_len_diff += len_diff.item()
+                    avg_len_perc += len_perc.item()
                     if hyps["exp_name"]=="test" and i>=3: break
                     if i>=nloops-l: break
                     if verbose:
-                        p = round(100*i/nloops, 2)
+                        p = round(100*(i+1)/nloops, 2)
                         t = round(time.time()-starttime, 4)
                         print("{}% -- {}s".format(p,t), end="         \r")
             div = (i+1)
             val_loss = round(avg_loss/div, 5)
             val_acc = round(avg_acc/div, 5)
+            val_len_diff = round(avg_len_diff/div, 5)
+            val_len_perc = round(avg_len_perc/div, 5)
             val_correct = round(avg_correct/div, 5)
 
             if verbose:
@@ -310,18 +330,31 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
 
                 logstr += s + "\n"
                 print()
+
                 s = "Final Stats, Epoch: {}".format(epoch)
                 print(s)
                 logstr += "\n" + s + "\n"
 
-                s = "Train Loss: {} -Train Acc: {}".format(
+                s = "Train Loss: {} - Train Acc: {}".format(
                     train_loss,train_acc
                 )
                 print(s)
                 logstr += s + "\n"
 
-                s = "Val Loss: {} -Val Acc: {}".format(
+                s = "Val Loss: {} - Val Acc: {}".format(
                     val_loss,val_acc
+                )
+                print(s)
+                logstr += s + "\n"
+
+                s = "Train LDiff: {} - Val LDiff: {}".format(
+                    train_len_diff,val_len_diff
+                )
+                print(s)
+                logstr += s + "\n"
+
+                s = "Train Len%: {} - Val Len%: {}".format(
+                    train_len_perc,val_len_perc
                 )
                 print(s)
                 logstr += s + "\n"
@@ -329,6 +362,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 s = "Val Correct: {}".format( val_correct )
                 print(s)
                 logstr += s + "\n"
+
 
                 s = "Epoch Dur: {}s".format(round(time.time()-epochtime))
                 logstr += s + "\n\n\n\n"
@@ -381,10 +415,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     if n_aug_samps>0:
                         print("Examples:")
                         examps = tokenizer.decode(aug_samps[0][:5])
-                        print("With Padding")
-                        for e,ex in enumerate(examps):
-                            print(e,"-",ex)
-                        print("Without Padding")
                         for e,ex in enumerate(examps):
                             print(e,"-",ex.replace(tokenizer.pad, ""))
                 except Exception as e:
@@ -398,8 +428,12 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     "epoch":       epoch,
                     "train_loss":  train_loss,
                     "train_acc":   train_acc,
+                    "train_len_diff":train_len_diff,
+                    "train_len_perc":train_len_perc,
                     "val_loss":    val_loss,
                     "val_acc":     val_acc,
+                    "val_len_diff":val_len_diff,
+                    "val_len_perc":val_len_perc,
                     "val_correct": val_correct,
                     "n_new_samps": n_new_samps,
                     "n_aug_samps": n_aug_samps,

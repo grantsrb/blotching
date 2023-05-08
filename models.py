@@ -619,6 +619,7 @@ class LossWrapper(torch.nn.Module):
         #  self.tokenizer.decode(data["input_ids"][0][~inpt_pad_mask[0]]))
         #print("post out:",
         #  self.tokenizer.decode(data["output_ids"][0][~out_pad_mask[0]]))
+
         out_ids = data["output_ids"]
         inpt_mask = ~inpt_pad_mask.reshape(-1)
         out_mask =  ~out_pad_mask.reshape(-1)
@@ -642,12 +643,23 @@ class LossWrapper(torch.nn.Module):
         #    print("Out mask sum:", out_pad_mask.float().sum())
         #    #print("post pred:",
         #    #  self.tokenizer.decode(preds.argmax(-1)[0][~inpt_pad_mask[0]]))
+        if self.training and not no_grad: loss.backward()
+        ret_dict["loss"] = loss
+
         argmax = torch.argmax(ps, dim=-1)
         acc = (argmax==labels).float().mean()
-        ret_dict["loss"] = loss
         ret_dict["acc"] = acc
 
-        if self.training and not no_grad: loss.backward()
+        out_ids = data["output_ids"]
+        out_ends = torch.argmax( (out_ids==eos_idx).long(), dim=-1 )
+        # Case where soln len exceeds seq_len. Ideally this doesn't
+        # happen
+        out_ends[out_ends==0] = out_ends.shape[-1]-1 
+        pred_ids = preds[:,int(incl_all_inpts):].argmax(-1)
+        pred_ends = torch.argmax( (pred_ids==eos_idx).long(), dim=-1 )
+        diffs = (out_ends-pred_ends).float()
+        ret_dict["len_diff"] = diffs.mean()
+        ret_dict["len_percent"] = (diffs/out_ends).mean()*100
 
         if ret_preds:
             ret_dict["preds"] = preds.argmax(-1)
