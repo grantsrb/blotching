@@ -872,12 +872,7 @@ def sample_data(math_env,
     solns = []
     max_soln_len = math_env.max_soln_len+2
     for i in range(n_samples):
-        prob = envs.MathEnv.sample_prob(
-            max_num=math_env.max_num,
-            max_ents=math_env.max_ents,
-            p_mult=math_env.p_mult,
-            space_mults=math_env.space_mults
-        )
+        prob = math_env.sample()
         probs.append(prob)
         soln = envs.MathEnv.find_soln(prob)
         solns.append(tokenizer.sep+soln)
