@@ -53,14 +53,13 @@ def get_stats(tokenizer, ids, remove_padding=True):
 if __name__=="__main__":
     rank = 0
     verbose = True
-    batch_size = 500
-    bsize = None # Determines batch size of evaluation
+    bsize = 1000 # Determines batch size of evaluation
     overwrite = False
     testing = False
-    max_num = None # override the max_num given by the hyps
-    # integer argument if you want to randomly sample n problems rather
+    max_num = None # override the max_num given by the hyps.
+    # Integer argument if you want to randomly sample n problems rather
     # than systematically looking at all possible problems.
-    rand_samps = 20000
+    rand_samps = 50000
 
     if testing: print("CURRENTLY IN TESTING MODE!!!!")
 
@@ -110,6 +109,7 @@ if __name__=="__main__":
         if bsize is not None:
             hyps["batch_size"] = bsize
             hyps["val_batch_size"] = bsize
+        hyps["zipf_order"] = 0 # Uniform sampling for validation
 
         # Establish math environment parameters
         math_env = envs.MathEnv(**hyps)
@@ -139,7 +139,7 @@ if __name__=="__main__":
                 math_env,
                 tokenizer,
                 max_len=hyps["seq_len"],
-                batch_size=batch_size,
+                batch_size=hyps["val_batch_size"],
                 rand_samps=rand_samps
             )
             data_caches[cache_tup] = data_cache
@@ -160,6 +160,7 @@ if __name__=="__main__":
         if verbose and rank==0: print("Evaluating Model")
         n_loops = len(iter(data_cache))
         for i,data in enumerate(data_cache):
+            start_time = time.time()
             if "meta_data" in data:
                 meta_data = data["meta_data"]
             if not hyps["model_parallel"]:
@@ -188,7 +189,7 @@ if __name__=="__main__":
                     df_dict["targ"].append(
                      soln.split(tokenizer.eos)[0].split(tokenizer.sep)[-1]
                     )
-                    df_dict["soln_str"].append(soln[1:])
+                    df_dict["soln_str"].append(soln[1:]) # removes =
                     df_dict["prob_str"].append(prob)
                     df_dict["label_str"].append(label)
 
@@ -204,8 +205,11 @@ if __name__=="__main__":
                 acc = acc / (~out_pad_mask).sum(-1)
                 df_dict["tok_acc"].append(acc.cpu().data.numpy())
                 print(
-                    "{}%".format(int(i/n_loops*100)),
-                    end="               \r"
+                    "{}% - {}s".format(
+                        int((i+1)/n_loops*100),
+                        round(time.time()-start_time, 2)
+                    ),
+                    end="                  \r"
                 )
 
         df_dict["tok_acc"] = np.concatenate(df_dict["tok_acc"], axis=0)
