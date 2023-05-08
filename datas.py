@@ -801,6 +801,7 @@ def augment_data(
 
             pred_ends = torch.argmax( (preds==eos).long(), dim=-1 )
             soln_ends = torch.argmax( (outputs==eos).long(),dim=-1 )
+            soln_ends[soln_ends==0] = outputs.shape[-1]+1
             shorts = ((soln_ends+1-pred_ends)>0)&(pred_ends>0)
 
             if hyps["exp_name"] == "test": 
@@ -862,13 +863,14 @@ def sample_data(math_env,
         solns: torch LongTensor (n_samples, max_len-probs.shape[1])
     """
     plen = math_env.prob_len
-    if max_len is None: slen = plen 
+    if max_len is None:
+        slen = math_env.max_soln_len+2 #+1 for eos, +1 for sep
     else: slen = max_len-plen
     assert slen>0, "Needs larger max_len!"
 
     probs = []
     solns = []
-    max_soln_len = 0
+    max_soln_len = math_env.max_soln_len+2
     for i in range(n_samples):
         prob = envs.MathEnv.sample_prob(
             max_num=math_env.max_num,
@@ -879,9 +881,10 @@ def sample_data(math_env,
         probs.append(prob)
         soln = envs.MathEnv.find_soln(prob)
         solns.append(tokenizer.sep+soln)
-        if len(solns[-1])>max_soln_len: max_soln_len = len(solns[-1])
+        if len(solns[-1])+1>max_soln_len:
+            max_soln_len = len(solns[-1])+1
+    if max_len is None and max_soln_len>slen: slen = max_soln_len
 
-    if max_len is None: slen = max_soln_len
     probs = tokenizer(probs,
         as_tensor=True,
         max_len=plen,

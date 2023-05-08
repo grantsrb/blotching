@@ -131,7 +131,64 @@ class MathEnv:
         self.zipf_order = zipf_order
         if p_ent is None: self.p_ent = (self.max_num-1)/self.max_num
         else: self.p_ent = p_ent
-        self.prob_len = (len(str(self.max_num))+1)*self.max_ents - 1
+        self.max_prob = self.get_max_prob()
+        print("Max Prob:", self.max_prob)
+        self.prob_len = len(self.max_prob)
+        self.max_soln = self.get_max_soln()
+        print("Max Soln:", self.max_soln)
+        print(
+            "WARNING: It's potentially possible that this isn't the"+\
+            " maximum length solution.."
+        )
+        self.max_soln_len = len(self.max_soln)
+
+    def get_max_prob(self):
+        """
+        Creates the maximum possible length problem given the member
+        variables. This does not necessarily result in the max_soln
+
+        Returns:
+            max_prob: str
+                the maximum length problem in terms of characters
+        """
+        max_prob = ""
+        if self.p_mult>0:
+            for i in range(self.max_ents):
+                max_prob += str(self.max_num)
+                if max_prob[-1]==mult_sign and self.space_mults:
+                    max_prob += sum_sign
+                else: max_prob += mult_sign
+        else:
+            max_prob = sum_sign.join(
+                [str(self.max_num) for _ in range(self.max_ents)]
+            )
+        return max_prob
+
+    def get_max_soln(self):
+        """
+        Creates the maximum possible length solution given the member
+        variables. This does not necessarily use the max_prob
+
+        Returns:
+            max_soln: str
+                the maximum length problem in terms of characters
+        """
+        ent = "".join(["9" for _ in range(len(str(self.max_num))-1)])
+        prob = ""
+        if self.p_mult>0:
+            for i in range(self.max_ents):
+                prob += ent
+                if prob[-1]==mult_sign and self.space_mults:
+                    prob += sum_sign
+                else: prob += mult_sign
+            prob = prob[:-1] # Remove the last math sign
+        else:
+            prob = sum_sign.join(
+                [ent for _ in range(self.max_ents)]
+            )
+            
+        soln = MathEnv.find_soln(prob)
+        return soln
 
     def sample(self):
         """
