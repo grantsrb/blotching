@@ -377,7 +377,7 @@ class MathEnv:
                       - if there are remaining 10s digits and a
                         hundreds digit forms, got back to step 1
         """
-        statements = [prob]
+        statements = [prob.strip()]
         labels = []
         statement_set = set(statements)
         ents = statements[-1].split(sum_sign)
@@ -420,7 +420,9 @@ class MathEnv:
                 labels.append(DECOMPOSE+"mult")
             loop += 1
         if sum_sign not in statement and mult_sign not in statement:
-            return "=".join(statements)
+            soln = "=".join(statements[1:])
+            if ret_labels: return soln, labels
+            return soln
 
         # Progressively decompose into ones, tens, 100s, ...
         # but only when there are multiple of a particular magnitude.
@@ -700,16 +702,19 @@ if __name__=="__main__":
     #    print(prob)
     #    soln = MathEnv.find_soln(prob)
     #    print("Soln:", soln)
-    math_env = MathEnv(
-            max_num=100,
-            max_ents=3,
-            p_mult=0.5,
-            p_paren=0,
-            space_mults=True,
-            max_mult_num=6,
-            zipf_order=0,
-            p_ent=0.5,
-    )
+    prob = "4*1"
+    soln = MathEnv.find_soln(prob)
+    print(soln)
+    #math_env = MathEnv(
+    #        max_num=100,
+    #        max_ents=3,
+    #        p_mult=0.5,
+    #        p_paren=0,
+    #        space_mults=True,
+    #        max_mult_num=6,
+    #        zipf_order=0,
+    #        p_ent=0.5,
+    #)
     #max_len = 0
     #min_len = 100
     #prob_hist = collections.defaultdict(lambda: 0)
