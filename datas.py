@@ -843,7 +843,9 @@ def augment_data(
 def sample_data(math_env,
                 tokenizer,
                 n_samples=100000,
-                max_len=100):
+                max_len=100,
+                ret_strings=False,
+                held_out_probs=set()):
     """
     Samples the raw string data from the math_env and then tokenizes.
     Returns LongTensor of tokens
@@ -858,9 +860,19 @@ def sample_data(math_env,
             the number of data points to sample
         max_len: int
             the max sequence length
+        ret_strings: bool
+            if true, will return string versions of problems and
+            solutions
+        held_out_probs: set of str
+            any problems that should be held out of the sampling
     Returns:
         probs: torch LongTensor (n_samples, (max_digits+1)*max_ents-1)
         solns: torch LongTensor (n_samples, max_len-probs.shape[1])
+        if ret_strings:
+            prob_strs: list of str
+                the problem strings
+            soln_strs: list of str
+                the solution strings
     """
     plen = math_env.prob_len
     if max_len is None:
@@ -868,31 +880,41 @@ def sample_data(math_env,
     else: slen = max_len-plen
     assert slen>0, "Needs larger max_len!"
 
-    probs = []
+    probs = set()
     solns = []
     max_soln_len = math_env.max_soln_len+2
     for i in range(n_samples):
         prob = math_env.sample()
-        probs.append(prob)
+        loop_count = 0
+        while prob in held_out_probs or prob in probs:
+            prob = math_env.sample()
+            loop_count += 1
+            if loop_count>100:
+                print("Sample space is too small for held_out_probs")
+                raise Exception
+        probs.add(prob)
         soln = envs.MathEnv.find_soln(prob)
         solns.append(tokenizer.sep+soln)
         if len(solns[-1])+1>max_soln_len:
             max_soln_len = len(solns[-1])+1
     if max_len is None and max_soln_len>slen: slen = max_soln_len
 
-    probs = tokenizer(probs,
+    probs = list(probs)
+    prob_ids = tokenizer(probs,
         as_tensor=True,
         max_len=plen,
         pad=True,
         add_eos=False
     )
-    solns = tokenizer(solns,
+    soln_ids = tokenizer(solns,
         as_tensor=True,
         max_len=slen,
         pad=True,
         add_eos=True
     )
-    return probs, solns
+    if ret_strings:
+        return prob_ids, soln_ids, probs, solns
+    return prob_ids, soln_ids
 
 def get_data_cache(math_env,
                    tokenizer,
@@ -900,6 +922,8 @@ def get_data_cache(math_env,
                    seq_len=100,
                    max_samples=None,
                    batch_size=128,
+                   ret_strings=False,
+                   held_out_probs=set(),
                    *args, **kwargs):
     """
     Creates an initial data_cache for storing and providing data.
@@ -919,18 +943,30 @@ def get_data_cache(math_env,
             if None, will default to init_samples
         batch_size: int
             the batch_size for the DataCache iterable
+        ret_strings: bool
+            if true, will return string versions of problems and
+            solutions
+        held_out_probs: set of str
+            any problems that should be held out of the sampling
     Returns:
         data_cache: DataCache
+        if ret_strings:
+            prob_strs: list of str
+                the problem strings
+            soln_strs: list of str
+                the solution strings
     """
     if max_samples is None: max_samples = init_samples
-    probs, solns = sample_data(
+    prob_ids, soln_ids, probs, solns = sample_data(
         math_env,
         tokenizer,
         n_samples=init_samples,
-        max_len=seq_len
+        max_len=seq_len,
+        ret_strings=True,
+        held_out_probs=held_out_probs
     )
-    prob_len = probs.shape[1]
-    data = torch.cat([probs, solns], dim=1)
+    prob_len = prob_ids.shape[1]
+    data = torch.cat([prob_ids, soln_ids], dim=1)
     if seq_len is None: seq_len = data.shape[-1]
     data_cache = DataCache(
         max_samples=max_samples,
@@ -939,6 +975,8 @@ def get_data_cache(math_env,
         init_data=data,
         prob_len=prob_len
     )
+    if ret_strings:
+        return data_cache, probs, solns
     return data_cache
 
 def get_validation_set(

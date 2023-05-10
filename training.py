@@ -60,6 +60,25 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
 
     # Make dataset
     if verbose and rank==0:
+        print("Collecting Validation Data")
+    val_samples = hyps.get("val_samples",int(0.2*hyps["max_samples"]))
+    if hyps["exp_name"] == "test":
+        val_samples = 1100
+    val_cache, val_probs, _ = datas.get_data_cache(
+        math_env,
+        tokenizer,
+        init_samples=val_samples,
+        seq_len=hyps["seq_len"],
+        max_samples=val_samples,
+        batch_size=hyps.get("val_batch_size",500),
+        ret_strings=True
+    )
+    val_probs = set(val_probs)
+    hyps["seq_len"] = val_cache.seq_len
+    hyps["prob_len"] = val_cache.prob_len
+    print("Using Sequence Length:", hyps["seq_len"])
+
+    if verbose and rank==0:
         print("Collecting Initial Data")
     if hyps["exp_name"]=="test":
         hyps["max_samples"] = 1000
@@ -75,10 +94,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         seq_len=hyps["seq_len"],
         max_samples=hyps["max_samples"],
         batch_size=hyps["batch_size"],
+        held_out_probs=val_probs
     )
-    hyps["seq_len"] = data_cache.seq_len
-    hyps["prob_len"] = data_cache.prob_len
-    print("Using Sequence Length:", hyps["seq_len"])
 
     model = make_model(hyps)
     hyps["model_parallel"] = hyps.get("model_parallel", False)
@@ -86,20 +103,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
 
     if hyps.get("star", False):
         collector = datas.Collector(model, hyps, tokenizer)
-
-    if verbose and rank==0:
-        print("Collecting Validation Data")
-    val_samples = hyps.get("val_samples",int(0.2*hyps["max_samples"]))
-    if hyps["exp_name"] == "test":
-        val_samples = 1100
-    val_cache = datas.get_data_cache(
-        math_env,
-        tokenizer,
-        init_samples=val_samples,
-        seq_len=hyps["seq_len"],
-        max_samples=val_samples,
-        batch_size=hyps.get("val_batch_size",500),
-    )
 
     if verbose and rank==0:
         print("Recording Session")
