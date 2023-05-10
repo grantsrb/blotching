@@ -140,7 +140,7 @@ class MathEnv:
         assert p_paren==0, "Parentheses are not yet implemented"
         self.space_mults = space_mults
         self.zipf_order = zipf_order
-        if p_ent is None: self.p_ent = (self.max_num-1)/self.max_num
+        if p_ent is None: self.p_ent = 0.5
         else: self.p_ent = p_ent
         self.max_prob = self.get_max_prob()
         print("Max Prob:", self.max_prob)
