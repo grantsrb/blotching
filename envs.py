@@ -147,6 +147,7 @@ class MathEnv:
         self.prob_len = len(self.max_prob)
         prob,self.max_soln = self.get_max_soln()
         print("Max Soln:", prob + "=" + self.max_soln)
+        print("Len:", len(prob + "=" + self.max_soln))
         print(
             "WARNING: It's potentially possible that this isn't the"+\
             " maximum length solution.."
