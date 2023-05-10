@@ -106,7 +106,12 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
 
     if verbose and rank==0:
         print("Recording Session")
-    if rank==0: ml_utils.training.record_session(hyps, model)
+    if rank==0:
+        ml_utils.training.record_session(hyps, model)
+        sf = hyps['save_folder']
+        with open(os.path.join(sf,"val_probs.txt"),"w") as f:
+            for prob in val_probs:
+                f.write(prob + "\n")
 
     # Wrap model to distribute loss calculations
     if verbose and rank==0:

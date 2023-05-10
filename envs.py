@@ -278,7 +278,7 @@ class MathEnv:
         break_i = max_ents
         for i in range(max_ents):
             # 50% prob of not including more terms
-            if i > 1 and np.random.random() < p_ent: continue
+            if i > 1 and np.random.random() > p_ent: continue
             if i > 0:
                 high_num = max_num
                 if space_mults and op==mult_sign: op = sum_sign
