@@ -1018,12 +1018,7 @@ def get_validation_set(
     max_soln_len = 0
     if rand_samps:
         for i in range(rand_samps):
-            prob = envs.MathEnv.sample_prob(
-                max_num=math_env.max_num,
-                max_ents=math_env.max_ents,
-                p_mult=math_env.p_mult,
-                space_mults=math_env.space_mults
-            )
+            prob = math_env.sample()
             probs.append(prob)
     else:
         probs = envs.MathEnv.recursive_probs(
