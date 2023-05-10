@@ -81,7 +81,7 @@ class TransformerModel(Model):
         self.model_type = 'Transformer'
         self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
         self.pos_encoder = globals()[self.posenc_type](
-            self.d_model,
+            d_model=self.d_model,
             posenc_drop_p=self.posenc_drop_p,
             drop_p=self.drop_p,
             max_len=self.max_posencs,
@@ -286,6 +286,21 @@ def generate_square_subsequent_mask(sz: int) -> Tensor:
     """
     #return torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
     return torch.triu(torch.ones(sz, sz), diagonal=1).bool()
+
+class IdentityPositionalEncoding(nn.Module):
+    def __init__(self,
+                 drop_p:float=0.1,
+                 *args, **kwargs):
+        super().__init__()
+        self.dropout = nn.Dropout(p=drop_p)
+
+    def forward(self, x: Tensor, *args, **kwargs) -> Tensor:
+        """
+        Arguments:
+            x: Tensor, shape ``[batch_size, seq_len, embedding_dim]``
+        """
+        x = self.dropout( x )
+        return x
 
 class PositionalEncoding(nn.Module):
     def __init__(self,
