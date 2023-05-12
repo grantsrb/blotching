@@ -880,26 +880,28 @@ def sample_data(math_env,
     else: slen = max_len-plen
     assert slen>0, "Needs larger max_len!"
 
-    probs = set()
+    prob_set = set()
+    probs = []
     solns = []
     max_soln_len = math_env.max_soln_len+2
+    n_overlapping = 0
     for i in range(n_samples):
         prob = math_env.sample()
         loop_count = 0
-        while prob in held_out_probs or prob in probs:
+        while (prob in held_out_probs or prob in prob_set) and\
+                                                loop_count<100:
             prob = math_env.sample()
             loop_count += 1
-            if loop_count>100:
-                print("Sample space is too small for held_out_probs")
-                raise Exception
-        probs.add(prob)
+            if loop_count>=100: n_overlapping += 1
+        prob_set.add(prob)
+        probs.append(prob)
         soln = envs.MathEnv.find_soln(prob)
         solns.append(tokenizer.sep+soln)
         if len(solns[-1])+1>max_soln_len:
             max_soln_len = len(solns[-1])+1
+    print("Overlapping Samples:", n_overlapping)
     if max_len is None and max_soln_len>slen: slen = max_soln_len
 
-    probs = list(probs)
     prob_ids = tokenizer(probs,
         as_tensor=True,
         max_len=plen,
@@ -1068,3 +1070,97 @@ def get_validation_set(
     )
     return data_cache
 
+def get_all_problems(math_env, shuffle=True):
+    """
+    Returns all possible problems for the given math environment.
+
+    Args:
+        math_env: MathEnv object
+        shuffle: bool
+            if true, will return a shuffled list of all possible
+            problems, otherwise it is ordered
+    Returns:
+        all_probs: list of str
+    """
+    all_probs = envs.MathEnv.recursive_probs(
+        prob="",
+        n_ents=math_env.max_ents,
+        max_num=math_env.max_num,
+        mult=math_env.p_mult>0,
+        space_mults=math_env.space_mults
+    )
+    if shuffle: np.random.shuffle(all_probs)
+    return all_probs
+
+def make_data_cache(probs,
+                   tokenizer,
+                   solns=None,
+                   plen=None,
+                   slen=None,
+                   seq_len=100,
+                   batch_size=128,
+                   max_samples=None,
+                   ret_strings=False,
+                   *args, **kwargs):
+    """
+    Creates a data_cache from the argued probs and solns
+
+    Args:
+        probs: list of str
+        tokenizer: Tokenizer object
+            if None, this function will create and return a tokenizer
+            object
+        solns: list of str or None
+            solns will be generated if None is argued
+        seq_len: int
+            the desired sequence lengths of the samples
+        batch_size: int
+            the batch_size for the DataCache iterable
+        max_samples: int or None
+            a parameter to limit the total amount of data in the cache.
+            if None, will default to init_samples
+        ret_strings: bool
+            if true, will return string versions of problems and
+            solutions
+    Returns:
+        data_cache: DataCache
+    """
+    if solns is None:
+        solns = []
+        for prob in probs:
+            soln = envs.MathEnv.find_soln(prob)
+            solns.append(tokenizer.sep + soln)
+    if plen is None:
+        plen = np.max([len(p) for p in probs])
+    if slen is None and seq_len is None:
+        slen = np.max([len(s) for s in solns])+2 #+1 for eos, +1 for sep
+    elif slen is None and seq_len:
+        slen = seq_len-plen
+
+    prob_ids = tokenizer(
+        probs,
+        as_tensor=True,
+        max_len=plen,
+        pad=True,
+        add_eos=False
+    )
+    soln_ids = tokenizer(
+        solns,
+        as_tensor=True,
+        max_len=slen,
+        pad=True,
+        add_eos=True
+    )
+
+    prob_len = prob_ids.shape[1]
+    data = torch.cat([prob_ids, soln_ids], dim=1)
+    if seq_len is None: seq_len = data.shape[-1]
+    data_cache = DataCache(
+        max_samples=max_samples,
+        seq_len=seq_len,
+        batch_size=batch_size,
+        init_data=data,
+        prob_len=prob_len
+    )
+    if ret_strings: return data_cache, probs, solns
+    return data_cache

@@ -59,43 +59,72 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     hyps["str2idx"] = tokenizer.str2idx
 
     # Make dataset
-    if verbose and rank==0:
-        print("Collecting Validation Data")
-    val_samples = hyps.get("val_samples",int(0.2*hyps["max_samples"]))
-    if hyps["exp_name"] == "test":
-        val_samples = 1100
-    val_cache, val_probs, _ = datas.get_data_cache(
-        math_env,
-        tokenizer,
-        init_samples=val_samples,
-        seq_len=hyps["seq_len"],
-        max_samples=val_samples,
-        batch_size=hyps.get("val_batch_size",500),
-        ret_strings=True
-    )
-    val_probs = set(val_probs)
-    hyps["seq_len"] = val_cache.seq_len
-    hyps["prob_len"] = val_cache.prob_len
-    print("Using Sequence Length:", hyps["seq_len"])
-
-    if verbose and rank==0:
-        print("Collecting Initial Data")
     if hyps["exp_name"]=="test":
         hyps["max_samples"] = 1000
         hyps["pre_epochs"] = 0
-    hyps["init_samples"] = hyps.get(
-        "init_samples", hyps.get("max_samples",100000)
-    )
-    if not hyps["init_samples"]:hyps["init_samples"]=hyps["max_samples"]
-    data_cache = datas.get_data_cache(
-        math_env,
-        tokenizer,
-        init_samples=hyps["init_samples"],
-        seq_len=hyps["seq_len"],
-        max_samples=hyps["max_samples"],
-        batch_size=hyps["batch_size"],
-        held_out_probs=val_probs
-    )
+    if verbose and rank==0:
+        print("Collecting Data")
+    all_problems = datas.get_all_problems(math_env, shuffle=True)
+    vbsize = hyps.get("val_batch_size",500)
+    if len(all_problems)<hyps["max_samples"]:
+        if verbose and rank==0:
+            print("Using all possible data")
+        val_len = int(0.2*len(all_problems))
+        val_cache, val_probs, val_solns = datas.make_data_cache(
+            probs=all_problems[:val_len],
+            tokenizer=tokenizer,
+            solns=None,
+            plen=math_env.prob_len,
+            slen=math_env.max_soln_len+2,
+            batch_size=vbsize,
+            ret_strings=True,
+        )
+        data_cache = datas.make_data_cache(
+            probs=all_problems[val_len:],
+            tokenizer=tokenizer,
+            solns=None,
+            plen=math_env.prob_len,
+            slen=math_env.max_soln_len+2,
+            batch_size=hyps["batch_size"]
+        )
+        hyps["seq_len"] = val_cache.seq_len
+        hyps["prob_len"] = val_cache.prob_len
+    else:
+        if verbose and rank==0:
+            print("Using sampling process")
+        val_samples = hyps.get("val_samples",int(0.2*hyps["max_samples"]))
+        if hyps["exp_name"] == "test":
+            val_samples = 1100
+        val_cache, val_probs, _ = datas.get_data_cache(
+            math_env=math_env,
+            tokenizer=tokenizer,
+            init_samples=val_samples,
+            seq_len=hyps["seq_len"],
+            max_samples=val_samples,
+            batch_size=hyps.get("val_batch_size",500),
+            ret_strings=True
+        )
+        val_probs = set(val_probs)
+        hyps["seq_len"] = val_cache.seq_len
+        hyps["prob_len"] = val_cache.prob_len
+
+        hyps["init_samples"] = hyps.get(
+            "init_samples", hyps.get("max_samples",100000)
+        )
+        if not hyps["init_samples"]:hyps["init_samples"]=hyps["max_samples"]
+        data_cache = datas.get_data_cache(
+            math_env=math_env,
+            tokenizer=tokenizer,
+            init_samples=hyps["init_samples"],
+            seq_len=hyps["seq_len"],
+            max_samples=hyps["max_samples"],
+            batch_size=hyps["batch_size"],
+            held_out_probs=val_probs
+        )
+    if verbose and rank==0:
+        print("Train Samples:", len(data_cache))
+        print("Val Samples:", len(val_cache))
+        print("Using Sequence Length:", hyps["seq_len"])
 
     model = make_model(hyps)
     hyps["model_parallel"] = hyps.get("model_parallel", False)
@@ -278,7 +307,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         avg_len_diff = 0
         avg_len_perc = 0
         avg_correct = 0
-        if rank==0 and epoch%val_mod==0:
+        if rank==0 and (epoch%val_mod==0 or epoch==n_epochs-1):
             ddp_model.eval()
             if verbose:
                 print("Validating...")

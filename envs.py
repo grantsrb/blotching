@@ -177,7 +177,8 @@ class MathEnv:
             max_soln: str
                 the maximum length problem in terms of characters
         """
-        ent = int("".join(["9" for _ in range(len(str(self.max_num))-1)]))
+        ent = self.max_num
+        if ent%10==0: ent = ent-1
         prob = sum_sign.join(
             [str(ent) for _ in range(self.max_ents)]
         )
@@ -623,7 +624,14 @@ class MathEnv:
         return mult_sign.join(integers)
 
     @staticmethod
-    def recursive_probs(prob="", n_ents=3, max_num=100, all_probs=[]):
+    def recursive_probs(
+            prob="",
+            n_ents=3,
+            max_num=100,
+            mult=False,
+            space_mults=True,
+            all_probs=[]
+        ):
         """
         Returns a list of problem strings ranging from 1+1 to
         max_num+max_num+... for n_ents.
@@ -638,6 +646,11 @@ class MathEnv:
                 generation.
             all_probs: list
                 the list to be populated with new problem strings
+            mult: bool
+                if true, will include multiplication signs
+            space_mults: bool
+                if true, will not allow two multiplications signs to
+                occur in a row.
         Returns:
             all_probs: list of str
                 all problem strings from 1+1 to max_num+max_num+...
@@ -648,10 +661,36 @@ class MathEnv:
             if len(prob)>0:
                 new_prob = prob + sum_sign + str(i)
                 all_probs.append(new_prob)
-            else: new_prob = str(i)
-            all_probs = MathEnv.recursive_probs(
-                new_prob, n_ents-1, max_num, all_probs=all_probs
-            )
+                all_probs = MathEnv.recursive_probs(
+                    new_prob,
+                    n_ents-1,
+                    max_num,
+                    mult=mult,
+                    space_mults=space_mults,
+                    all_probs=all_probs
+                )
+                if mult and (not space_mults or len(prob)<2 or \
+                                                prob[-2]!=mult_sign):
+                    new_prob = prob + mult_sign + str(i)
+                    all_probs.append(new_prob)
+                    all_probs = MathEnv.recursive_probs(
+                        new_prob,
+                        n_ents-1,
+                        max_num,
+                        mult=mult,
+                        space_mults=space_mults,
+                        all_probs=all_probs
+                    )
+            else:
+                new_prob = str(i)
+                all_probs = MathEnv.recursive_probs(
+                    new_prob,
+                    n_ents-1,
+                    max_num,
+                    mult=mult,
+                    space_mults=space_mults,
+                    all_probs=all_probs
+                )
         return all_probs
 
 def eval_prob(prob):
@@ -697,73 +736,74 @@ def zipfian(low=1, high=9, order=1, size=None):
 
 if __name__=="__main__":
     #probs = MathEnv.recursive_probs(
-    #    "", 4, 5
+    #    "", 3, 5, mult=True, space_mults=True
     #)
+    #print(len(probs))
     #for prob in probs:
     #    print(prob)
-    #    soln = MathEnv.find_soln(prob)
-    #    print("Soln:", soln)
-    prob = "4*1"
-    soln = MathEnv.find_soln(prob)
-    print(soln)
-    #math_env = MathEnv(
-    #        max_num=100,
-    #        max_ents=3,
-    #        p_mult=0.5,
-    #        p_paren=0,
-    #        space_mults=True,
-    #        max_mult_num=6,
-    #        zipf_order=0,
-    #        p_ent=0.5,
-    #)
-    #max_len = 0
-    #min_len = 100
-    #prob_hist = collections.defaultdict(lambda: 0)
-    #for i in range(1000):
-    #    prob = MathEnv.sample_prob(
-    #        max_num=100,
-    #        max_ents=3,
-    #        p_mult=0.25,
-    #        space_mults=True,
-    #        max_mult_num=5
-    #    )
-    #    if "*" in prob:
-    #        splt = prob.split(sum_sign)
-    #        for s in splt:
-    #            prob_hist[s] += 1
-    #    soln = MathEnv.find_soln(prob)
-    #    if "=00" in soln:
-    #        print()
-    #        print("Found issue:")
-    #        print("prob:", prob)
-    #        print("Soln:", soln)
-    #    try:
-    #        if len(soln) < min_len:
-    #            min_len = len(soln)
-    #            min_soln = soln
-    #            min_prob = prob
-    #        elif len(soln) > max_len:
-    #            max_len = len(soln)
-    #            max_soln = soln
-    #            max_prob = prob
-    #        #print(soln)
-    #        #print()
-    #        gtruth = eval_prob(prob)
-    #        splt = soln.split("=")
-    #        for s in splt:
-    #            assert gtruth == eval_prob(s)
-    #    except:
-    #        print("gtr:", gtruth)
-    #        print("try:", splt2)
-    #        print(soln)
-    #        assert False
-    #print("Min:",min_len)
-    #print("prob:", min_prob)
-    #print("soln:", min_soln)
-    #print()
-    #print("Max:",max_len)
-    #print("prob:", max_prob)
-    #print("soln:", max_soln)
+        #soln = MathEnv.find_soln(prob)
+        #print("Soln:", soln)
+    #prob = "4*1"
+    #soln = MathEnv.find_soln(prob)
+    #print(soln)
+    math_env = MathEnv(
+            max_num=100,
+            max_ents=3,
+            p_mult=0.5,
+            p_paren=0,
+            space_mults=True,
+            max_mult_num=6,
+            zipf_order=0,
+            p_ent=0.5,
+    )
+    max_len = 0
+    min_len = 100
+    prob_hist = collections.defaultdict(lambda: 0)
+    for i in range(1000):
+        prob = MathEnv.sample_prob(
+            max_num=100,
+            max_ents=3,
+            p_mult=0.25,
+            space_mults=True,
+            max_mult_num=5
+        )
+        if "*" in prob:
+            splt = prob.split(sum_sign)
+            for s in splt:
+                prob_hist[s] += 1
+        soln = MathEnv.find_soln(prob)
+        if "=00" in soln:
+            print()
+            print("Found issue:")
+            print("prob:", prob)
+            print("Soln:", soln)
+        try:
+            if len(soln) < min_len:
+                min_len = len(soln)
+                min_soln = soln
+                min_prob = prob
+            elif len(soln) > max_len:
+                max_len = len(soln)
+                max_soln = soln
+                max_prob = prob
+            #print(soln)
+            #print()
+            gtruth = eval_prob(prob)
+            splt = soln.split("=")
+            for s in splt:
+                assert gtruth == eval_prob(s)
+        except:
+            print("gtr:", gtruth)
+            print("try:", splt2)
+            print(soln)
+            assert False
+    print("Min:",min_len)
+    print("prob:", min_prob)
+    print("soln:", min_soln)
+    print()
+    print("Max:",max_len)
+    print("prob:", max_prob)
+    print("soln:", max_soln)
     ##print()
     ##print("Hist:")
     ##keys = sorted(list(prob_hist.keys()))
