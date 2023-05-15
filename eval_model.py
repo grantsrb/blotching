@@ -59,7 +59,7 @@ if __name__=="__main__":
     max_num = None # override the max_num given by the hyps.
     # Integer argument if you want to randomly sample n problems rather
     # than systematically looking at all possible problems.
-    rand_samps = 50000
+    rand_samps = 1000
 
     if testing: print("CURRENTLY IN TESTING MODE!!!!")
 
@@ -178,10 +178,10 @@ if __name__=="__main__":
                     prob_len=plen,
                     no_grad=True,
                     incl_all_inpts=True,
+                    blotch_p=0
                 )
                 pred_ids = package["preds"]
 
-                out_ids = data["output_ids"][:,:plen]
                 probs = meta_data["probs"]
                 solns =  meta_data["solns"]
                 labels =  meta_data["labels"]
@@ -215,12 +215,15 @@ if __name__=="__main__":
         df_dict["tok_acc"] = np.concatenate(df_dict["tok_acc"], axis=0)
         print("Making pandas dataframe")
         for k in df_dict:
-            print(k, len(df_dict[k]), df_dict[k][0])
+            print(k, "Len:", len(df_dict[k]), "- Examp:", df_dict[k][0])
         df = pd.DataFrame(df_dict)
         for k,v in hyps.items():
             try:
                 df[k] = v
             except: print("error for", k)
+        print()
+        print("Avg Token Acc:", (df["tok_acc"]).mean())
+        print("Avg Correct:", (df["ans"]==df["targ"]).mean())
         print("Saving...")
         if os.path.exists(csv_path) and not overwrite:
             og_df = pd.read_csv(csv_path)

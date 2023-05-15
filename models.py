@@ -6,6 +6,10 @@ import numpy as np
 import ml_utils.utils as utils
 import math
 
+DEVICES = {
+    -1: "cpu", **{i:i for i in range(10)}
+}
+
 class Model(torch.nn.Module):
     def __init__(self, n_tokens: int,
                        d_model:int=128,
@@ -294,7 +298,8 @@ class TransformerModel(Model):
             incl_all_inpts: bool
                 if true, will include all input tokens in the output
                 prediction tensor. otherwise only includes "predicted
-                spaces". This is useful to save a concatenation during
+                spaces". "predicted spaces" includes the shifted initial
+                inputs.  This is useful to save a concatenation during
                 the data bootstrapping phase.
             pad_pos_skip: bool
                 if true, will skip over masked tokens when applying
@@ -316,7 +321,7 @@ class TransformerModel(Model):
         )
         preds = torch.zeros(
             (B,S+n_steps+incl_all_inpts,self.n_tokens),
-            device=embs.get_device()
+            device=DEVICES[embs.get_device()]
         )
         preds[:,:S-1+incl_all_inpts].scatter_(
             dim=-1,
@@ -326,11 +331,11 @@ class TransformerModel(Model):
         if mask is None:
             mask = generate_square_subsequent_mask(
                 embs.shape[1]
-            ).to(self.get_device())
+            ).to(DEVICES[self.get_device()])
         elif is_causal:
             temp = generate_square_subsequent_mask(embs.shape[1])
             mask = temp|mask
-            mask = mask.to(self.get_device())
+            mask = mask.to(DEVICES[self.get_device()])
 
         for step in range(n_loops):
             temp = self.pos_encoder(
@@ -423,7 +428,7 @@ class BlotchTokenModel(TransformerModel):
             blotch_p = blotch_ids.float()/self.bp_gran
             #blotch_p = blotch_range*self.bp_diff+self.bp_min
             blotch_ids += self.n_tokens
-        blotch_ids = blotch_ids.to(src.get_device())
+        blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
 
         if tforce:
             blotch_mask = get_blotch_mask(
@@ -432,7 +437,7 @@ class BlotchTokenModel(TransformerModel):
                 blotch_p=blotch_p,
             )
             bmean = blotch_mask.float().mean(-1)
-            pad_mask = pad_mask|blotch_mask.to(pad_mask.get_device())
+            pad_mask = pad_mask|blotch_mask.to(DEVICES[pad_mask.get_device()])
             pad_mask = torch.nn.functional.pad(
                 pad_mask, (1, 0), value=False
             )
@@ -445,6 +450,8 @@ class BlotchTokenModel(TransformerModel):
                 is_causal=is_causal
             )
             ret_dict["blotch_mask"] = blotch_mask
+            # Remove the blotch token
+            ret_dict["preds"] = ret_dict["preds"][:,1:]
         else:
             src = torch.cat([blotch_ids[...,None], src], dim=-1)
             pad_mask = torch.nn.functional.pad(
@@ -456,10 +463,12 @@ class BlotchTokenModel(TransformerModel):
                 pad_mask=pad_mask,
                 is_causal=is_causal,
                 n_steps=n_steps,
-                incl_all_inpts=incl_all_inpts
+                incl_all_inpts=False
             )
-        # Remove the blotch token
-        ret_dict["preds"] = ret_dict["preds"][:,1:]
+            # Don't need to remove blotch token because freedom_fwd
+            # always does it for us.
+            if not incl_all_inpts:
+                ret_dict["preds"] = ret_dict["preds"][:,1:]
         return ret_dict
 
 def generate_square_subsequent_mask(sz: int) -> Tensor:
@@ -556,7 +565,7 @@ class PositionalEncoding(nn.Module):
         if mask is None: return self.vanil_forward(x)
         pe = self.posenc_dropout(self.pe[:x.size(1)])
 
-        sums = (~mask).float().sum(-1)
+        sums = torch.sum((~mask).float(), -1)
         idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
         fx = torch.zeros_like(x)
         fx = x + fx
@@ -718,6 +727,21 @@ class LossWrapper(torch.nn.Module):
         inpt_pad_mask = (data["input_ids"]==pad_idx)
         inpt_pad_mask = inpt_pad_mask|(data["input_ids"]==eos_idx)
         out_pad_mask  = data["output_ids"]==pad_idx
+
+        #print()
+        #print("Full inpt:",
+        #  self.tokenizer.decode(data["input_ids"][0]))
+        #print("Full Outpt:",
+        #  self.tokenizer.decode(data["output_ids"][0]))
+        #print("dropped inpt:",
+        #  self.tokenizer.decode(data["input_ids"][0][inpt_pad_mask[0]]))
+        #print("dropped out:",
+        #  self.tokenizer.decode(data["output_ids"][0][out_pad_mask[0]]))
+        #print("post inpt:",
+        #  self.tokenizer.decode(data["input_ids"][0][~inpt_pad_mask[0]]))
+        #print("post out:",
+        #  self.tokenizer.decode(data["output_ids"][0][~out_pad_mask[0]]))
+
 
         #non_overlaps = inpt_pad_mask.sum(-1)!=out_pad_mask.sum(-1)
         #if torch.any(non_overlaps):
@@ -956,7 +980,7 @@ def loss_and_acc(preds, labels, attn, loss_fxn, loss_scale=1,top_k=None):
         if argued, returns a calculation of the top_k accuracy
     """
     ps = preds.reshape(-1,preds.shape[-1])
-    device = ps.get_device()
+    device = DEVICES[ps.get_device()]
     try:
         labels = labels.reshape(-1).to(device)
         idx = attn.bool().reshape(-1).to(device)
