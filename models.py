@@ -349,6 +349,14 @@ class TransformerModel(Model):
         return {"preds": preds}
 
 class BlotchTokenModel(TransformerModel):
+    """
+    This model type includes a special token type indicating the
+    blotch_p quantity. The token type is handled automatically by
+    the forward function. Simply argue the appropriate blotch_p in the
+    forward function. Generally speaking, the blotch_p will be rounded
+    to the nearest 0.1, and you cannot exceed the blotch_p_max value
+    set at the start.
+    """
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.model_type = 'Blotch'
