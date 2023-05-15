@@ -57,6 +57,9 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     )
     hyps["n_tokens"] = tokenizer.n_tokens
     hyps["str2idx"] = tokenizer.str2idx
+    hyps["sep_idx"] = tokenizer.sep_idx
+    hyps["pad_idx"] = tokenizer.pad_idx
+    hyps["eos_idx"] = tokenizer.eos_idx
 
     # Make dataset
     if hyps["exp_name"]=="test":
@@ -326,7 +329,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                         tforce=False,
                         seq_len=hyps["seq_len"],
                         prob_len=val_cache.prob_len,
-                        incl_intl_prob=hyps.get("incl_intl_prob", False)
+                        incl_intl_prob=hyps.get("incl_intl_prob", False),
+                        blotch_p=hyps.get("bootstrap_blotch_p", 0)
                     )
                     loss = package["loss"]
                     acc = package["acc"]

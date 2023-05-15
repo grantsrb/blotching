@@ -14,12 +14,16 @@ class Model(torch.nn.Module):
                        n_layers:int=3,
                        posenc_type:str="SinPositionalEncoding",
                        norm_first:bool=True,
-                       blotch_p:int=0.3,
+                       blotch_p:float=0.3,
+                       blotch_p_min:float=None,
+                       blotch_p_max:float=None,
+                       n_btokens:int=None,
                        drop_p:float=0.5,
                        max_posencs:int=1000,
                        posenc_drop_p:float=None,
                        learn_posencs:bool=False,
                        pad_pos_skip:bool=False,
+                       sep_idx:int=None,
                        *args, **kwargs):
         """
         n_tokens: int
@@ -42,6 +46,18 @@ class Model(torch.nn.Module):
             can't remember the name of)
         blotch_p: float
             the blotch probability. 0 means no blotching.
+        blotch_p_min: float
+            the lowest blotch probability for the blotch tokens. 0
+            means no blotching.
+        blotch_p_max: float
+            the highest blotch probability for the blotch tokens. 1
+            means all blotching.
+        n_btokens: int
+            the number of blotch tokens. This is effectively a
+            granularity parameter for blotch values. If None, will
+            default to blotch_p increments of 0.1 on the difference
+            of bp_max and bp_min. For example, if bp_max-bp_min is
+            0.4, then there will be 0.4/0.1 + 1 = 5 tokens
         drop_p: float
             the dropout probability. 0 means no dropout.
         max_posencs: int
@@ -55,6 +71,8 @@ class Model(torch.nn.Module):
         pad_pos_skip: bool
             if true, will skip over masked tokens when applying positional
             encodings based on the pad mask.
+        sep_idx: int
+            the id of the sep token
         """
         super().__init__()
         self.n_tokens = n_tokens
@@ -63,6 +81,21 @@ class Model(torch.nn.Module):
         self.h_mult = h_mult
         self.n_layers = n_layers
         self.blotch_p = blotch_p
+        self.bp_min = blotch_p_min
+        if blotch_p_min is None: self.bp_min = blotch_p
+        self.bp_max = blotch_p_max
+        if blotch_p_max is None: self.bp_max = blotch_p
+        self.bp_diff = self.bp_max - self.bp_min
+        self.n_btokens = n_btokens
+        if n_btokens is None:
+            self.bp_gran = 10 # the granularity of the blotch p
+            # the blotch token values will be divided by this value
+            # to determine the actual blotch p
+            self.n_btokens = max(int(self.bp_diff*self.bp_gran), 1)
+            print("Num Blotch Tokens:", self.n_btokens)
+        else:
+            assert self.bp_diff>0
+            self.bp_gran = self.n_btokens/self.bp_diff
         self.drop_p = drop_p
         self.posenc_type = posenc_type
         self.norm_first = norm_first
@@ -71,9 +104,29 @@ class Model(torch.nn.Module):
         if self.posenc_drop_p is None: self.posenc_drop_p = drop_p
         self.learn_posencs = learn_posencs
         self.pad_pos_skip = pad_pos_skip
+        self.sep_idx = sep_idx
 
     def get_device(self):
         return next(self.parameters()).get_device()
+
+    def get_blotch_ids(self, blotch_ps):
+        """
+        This function takes a float or tensor of blotch probabilities
+        and converts it into an id tensor corresponding to the blotch
+        tokens. Remember that there is an offset of self.n_tokens, so
+        the blotch id for a blotch_p of 0 is self.n_tokens
+
+        Args:
+            blotch_ps: float or FloatTensor (N,)
+        Returns:
+            blotch_ids: LongTensor (N,)
+        """
+        if type(blotch_ps)!=type(torch.Tensor()):
+            blotch_ps = torch.full((1,), blotch_ps)
+        if self.bp_diff == 0: blotch_range = torch.zeros_like(blotch_ps)
+        else: blotch_range = (blotch_ps+0.01-self.bp_min)/self.bp_diff
+        blotch_ids = (blotch_range*self.n_btokens).long()+self.n_tokens
+        return blotch_ids
 
 class TransformerModel(Model):
     def __init__(self, *args, **kwargs):
@@ -119,12 +172,14 @@ class TransformerModel(Model):
                       n_steps:int=10,
                       temperature=None,
                       incl_all_inpts=False,
+                      blotch_p=None,
                       *args, **kwargs):
         """
         Arguments:
             src: Tensor, shape ``[bsize, seq_len]``
             mask: Tensor, shape ``[seq_len, seq_len]``
             pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
             is_causal: bool
                 If specified, applies a causal mask as mask (optional)
                 and ignores attn_mask for computing scaled dot product
@@ -146,22 +201,33 @@ class TransformerModel(Model):
             pad_pos_skip: bool
                 if true, will skip over tokens when applying positional
                 encodings based on the pad mask.
+            blotch_p: float
+                the blotch probability. 0 means no blotching.
         Returns:
             if tforce:
               output Tensor of shape ``[bsize, seq_len, n_tokens]``
             else:
               output Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
         """
-
         if tforce:
-            return self.tforce_fwd(
+            if self.blotch_p and self.training:
+                blotch_mask = get_blotch_mask(
+                    src,
+                    sep_idx=self.sep_idx,
+                    blotch_p=self.blotch_p,
+                )
+                pad_mask = pad_mask|blotch_mask
+
+            ret_dict = self.tforce_fwd(
                 src=src,
                 mask=mask,
                 pad_mask=pad_mask,
                 is_causal=is_causal
             )
+            if self.blotch_p and self.training:
+                ret_dict["blotch_mask"] = blotch_mask
         else:
-            return self.freedom_fwd(
+            ret_dict = self.freedom_fwd(
                 src=src,
                 mask=mask,
                 pad_mask=pad_mask,
@@ -169,6 +235,7 @@ class TransformerModel(Model):
                 n_steps=n_steps,
                 incl_all_inpts=incl_all_inpts
             )
+        return ret_dict
 
     def tforce_fwd(self, src:torch.Tensor,
                       mask:torch.Tensor=None,
@@ -179,6 +246,7 @@ class TransformerModel(Model):
             src: Tensor, shape ``[bsize, seq_len]``
             mask: Tensor, shape ``[seq_len, seq_len]``
             pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
             is_causal: bool
                 If specified, applies a causal mask as mask (optional)
                 and ignores attn_mask for computing scaled dot product
@@ -201,7 +269,7 @@ class TransformerModel(Model):
             mask=mask,
             src_key_padding_mask=pad_mask
         )
-        return self.decoder(output)
+        return {"preds": self.decoder(output)}
 
     def freedom_fwd(self, src:torch.Tensor,
                       mask:torch.Tensor=None,
@@ -215,6 +283,7 @@ class TransformerModel(Model):
             src: Tensor, shape ``[bsize, seq_len]``
             mask: Tensor, shape ``[seq_len, seq_len]``
             pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
             is_causal: bool
                 If specified, applies a causal mask as mask (optional)
                 and ignores attn_mask for computing scaled dot product
@@ -277,12 +346,118 @@ class TransformerModel(Model):
             if step < n_steps:
                 argmaxs = torch.argmax(pred, dim=-1)
                 embs[:,S+step] = self.embeddings(argmaxs)
-        return preds
+        return {"preds": preds}
+
+class BlotchTokenModel(TransformerModel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'Blotch'
+        n_embs = self.n_tokens+self.n_btokens
+        self.embeddings = torch.nn.Embedding(n_embs,self.d_model)
+        self.init_weights()
+
+    def forward(self, src:torch.Tensor,
+                      mask:torch.Tensor=None,
+                      pad_mask:torch.Tensor=None,
+                      is_causal:bool=None,
+                      tforce:bool=True,
+                      n_steps:int=10,
+                      temperature=None,
+                      incl_all_inpts=False,
+                      blotch_p=None,
+                      *args, **kwargs):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Bool Tensor, shape ``[seq_len, seq_len]``
+            pad_mask: Bool Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            is_causal: bool
+                If specified, applies a causal mask as mask (optional)
+                and ignores attn_mask for computing scaled dot product
+                attention.
+            tforce: bool
+                determines whether or not to teacherforce
+            n_steps: int
+                the number of prediction steps if not using teacher
+                forcing
+            temperature: float
+                not yet implemented, but this will be a sampling
+                parameter that adjusts the stochasticity of sampling.
+            incl_all_inpts: bool
+                if true, will include all input tokens in the output
+                prediction tensor. otherwise only includes "predicted
+                spaces". Only applies if using freedom fwd. This is
+                useful to save a concatenation during the data
+                bootstrapping phase.
+            pad_pos_skip: bool
+                if true, will skip over tokens when applying positional
+                encodings based on the pad mask.
+            blotch_p: float
+                the amount of blotching to use. If None is argued, the
+                blotching is sampled from bp_min to bp_max
+                member variables.
+        Returns:
+            if tforce:
+              output Tensor of shape ``[bsize, seq_len, n_tokens]``
+            else:
+              output Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
+        """
+        if blotch_p is not None:
+            blotch_ids = self.get_blotch_ids(blotch_p)
+            if len(blotch_ids) == 1:
+                # Just creates a tensor of len(src) of all blotch_id values
+                blotch_ids = torch.full((len(src),), blotch_ids.item())
+            blotch_p = (blotch_ids-self.n_tokens).float()/self.bp_gran
+        else:
+            blotch_range = torch.rand(len(src))
+            blotch_ids=(blotch_range*self.n_btokens).long()
+            blotch_p = blotch_ids.float()/self.bp_gran
+            #blotch_p = blotch_range*self.bp_diff+self.bp_min
+            blotch_ids += self.n_tokens
+        blotch_ids = blotch_ids.to(src.get_device())
+
+        if tforce:
+            blotch_mask = get_blotch_mask(
+                src,
+                sep_idx=self.sep_idx,
+                blotch_p=blotch_p,
+            )
+            bmean = blotch_mask.float().mean(-1)
+            pad_mask = pad_mask|blotch_mask.to(pad_mask.get_device())
+            pad_mask = torch.nn.functional.pad(
+                pad_mask, (1, 0), value=False
+            )
+            src = torch.cat([blotch_ids[...,None], src], dim=-1)
+
+            ret_dict = self.tforce_fwd(
+                src=src,
+                mask=mask,
+                pad_mask=pad_mask,
+                is_causal=is_causal
+            )
+            ret_dict["blotch_mask"] = blotch_mask
+        else:
+            src = torch.cat([blotch_ids[...,None], src], dim=-1)
+            pad_mask = torch.nn.functional.pad(
+                pad_mask, (1, 0), value=False
+            )
+            ret_dict = self.freedom_fwd(
+                src=src,
+                mask=mask,
+                pad_mask=pad_mask,
+                is_causal=is_causal,
+                n_steps=n_steps,
+                incl_all_inpts=incl_all_inpts
+            )
+        # Remove the blotch token
+        ret_dict["preds"] = ret_dict["preds"][:,1:]
+        return ret_dict
 
 def generate_square_subsequent_mask(sz: int) -> Tensor:
     """
-    Generates an upper-triangular matrix of ``-inf``, with zeros on
-    ``diag``.
+    Generates an upper-triangular matrix of True, with Falses on
+    diag.
     """
     #return torch.triu(torch.ones(sz, sz) * float('-inf'), diagonal=1)
     return torch.triu(torch.ones(sz, sz), diagonal=1).bool()
@@ -466,7 +641,8 @@ class LossWrapper(torch.nn.Module):
                                              incl_intl_prob=False,
                                              temperature=1.,
                                              incl_all_inpts=False,
-                                             top_k=5):
+                                             top_k=5,
+                                             blotch_p=None):
         """
         Args:
             data: dict
@@ -509,6 +685,7 @@ class LossWrapper(torch.nn.Module):
                 .backward if in training mode.
             top_k: int optional
                 if argued, returns a calculation of the top_k accuracy
+            blotch_p: float or float tensor (B,)
         Returns:
             ret_dict: dict (keys: str, vals: torch tensor)
                 "loss": torch tensor (1,)
@@ -537,7 +714,8 @@ class LossWrapper(torch.nn.Module):
         #non_overlaps = inpt_pad_mask.sum(-1)!=out_pad_mask.sum(-1)
         #if torch.any(non_overlaps):
         #    idx = torch.argmax(non_overlaps.long(), axis=-1)
-        #    print("idx:", idx, "inpt:", inpt_pad_mask.sum(-1)[idx], "outp:", out_pad_mask.sum(-1)[idx])
+        #    print("idx:", idx, "inpt:", inpt_pad_mask.sum(-1)[idx],
+        #                       "outp:", out_pad_mask.sum(-1)[idx])
         #    print("early inpt:",
         #      self.tokenizer.decode(data["input_ids"][idx]))
         #    print("early dropped out:",
@@ -557,23 +735,19 @@ class LossWrapper(torch.nn.Module):
 
         # Need to be careful with intermediate padding
         if tforce:
-            if self.model.blotch_p>0:
-                blotch_mask = get_blotch_mask(
-                    data["input_ids"],
-                    sep_idx=self.tokenizer.sep_idx,
-                    blotch_p=self.model.blotch_p,
-                    allow_contig=self.hyps.get("contig_blotches",True),
-                )
-                inpt_pad_mask = inpt_pad_mask|blotch_mask
-                out_pad_mask[:,:-1] = out_pad_mask[:,:-1]|blotch_mask[:,1:]
-                #print("blotch Inpt mask sum:", inpt_pad_mask.float().sum())
-                #print("blotch Out mask sum:", out_pad_mask.float().sum())
-            preds = self.model(
+            ret_dict = self.model(
                 data["input_ids"],
                 pad_mask=inpt_pad_mask,
                 is_causal=True,
-                tforce=tforce
+                tforce=tforce,
+                blotch_p=blotch_p,
+                tokenizer=self.tokenizer
             )
+            preds = ret_dict["preds"]
+            if "blotch_mask" in ret_dict:
+                blotch_mask = ret_dict["blotch_mask"]
+                inpt_pad_mask = inpt_pad_mask|blotch_mask
+                out_pad_mask[:,:-1]=out_pad_mask[:,:-1]|blotch_mask[:,1:]
         else:
             if prob_len is None:
                 s = self.tokenizer.sep_idx
@@ -581,14 +755,17 @@ class LossWrapper(torch.nn.Module):
             # +1 to include intial equals sign in seed sequence
             plen = prob_len + 1
             tot_len = data["output_ids"].shape[-1]
-            preds = self.model(
+            ret_dict = self.model(
                 data["input_ids"][...,:plen],
                 pad_mask=inpt_pad_mask[..., :plen],
                 is_causal=True,
                 tforce=tforce,
                 n_steps=tot_len-plen,
-                incl_all_inpts=incl_all_inpts
+                incl_all_inpts=incl_all_inpts,
+                blotch_p=blotch_p,
+                tokenizer=self.tokenizer
             )
+            preds = ret_dict["preds"]
             #print("preds:", preds.shape)
             #print("Sep:", self.tokenizer.sep_idx)
             #print("eqls:", self.tokenizer.sep_idx)
@@ -603,20 +780,6 @@ class LossWrapper(torch.nn.Module):
             #    out_ids[0,prob_len:][~out_pad_mask[0,prob_len:]]
             #)
 
-            #print(
-            #    "input:",
-            #    self.tokenizer.decode(
-            #        data["input_ids"][0,:plen][~inpt_pad_mask[0,:plen]]
-            #    )
-            #)
-            #print(
-            #    "output:",
-            #    self.tokenizer.decode(
-            #        out_ids[0,prob_len:][~out_pad_mask[0,prob_len:]]
-            #    )
-            #)
-            #assert False
-
         if not incl_intl_prob:
             if prob_len is None:
                 s = self.tokenizer.sep_idx
@@ -626,6 +789,11 @@ class LossWrapper(torch.nn.Module):
             #print("intlprob Inpt mask sum:", inpt_pad_mask.float().sum())
             #print("intlprob Out mask sum:", out_pad_mask.float().sum())
 
+        #print()
+        #print("Full inpt:",
+        #  self.tokenizer.decode(data["input_ids"][0]))
+        #print("Full Outpt:",
+        #  self.tokenizer.decode(data["output_ids"][0]))
         #print("dropped inpt:",
         #  self.tokenizer.decode(data["input_ids"][0][inpt_pad_mask[0]]))
         #print("dropped out:",
@@ -714,8 +882,9 @@ def get_blotch_mask(
         sep_idx: int
             the separation index. in this project, the separation index
             is most likely the equals sign.
-        blotch_p: float
-            the probability of blotching a valid, blotchable sequence.
+        blotch_p: float or torch float tensor (B,1)
+            a tensor of the probability of blotching a valid, blotchable
+            sequence for each data sample.
         allow_contig: bool 
             if true, will allow contiguous blotches. If false, will
             separate blotch segments by at least one semantic step
@@ -727,11 +896,16 @@ def get_blotch_mask(
             seq_len). Otherwise it will return a mask of shape
             (batch_size, seq_len)
     Returns:
-        blotch_mask: torch BoolTensor (B,S,S) or (B,S)
-            the shape will depend on the argument for indy_blotching.
+        blotch_mask: torch BoolTensor (B,S)
+            the shape will depend on the argument for indy_blotching
+            but indy_blotching is not yet implemented.
     """
     seps = (idxs==sep_idx)
     sep_coords = torch.nonzero(seps)
+    if type(blotch_p)==type(float()):
+        blotch_p = torch.full((1,), blotch_p)
+    elif len(blotch_p.shape)==1: blotch_p = blotch_p[..., None].cpu()
+
     if indy_blotching:
         # Need to individually blotch along each sequence
         raise NotImplemented
@@ -745,13 +919,13 @@ def get_blotch_mask(
                 mask[row, col:stop_col] = do_blotches[i]
     else:
         mask = torch.zeros_like(idxs).bool()
-        do_blotches = torch.rand(len(sep_coords))<blotch_p
+        do_blotches = torch.rand(idxs.shape)<=blotch_p
         is_contig = False
-        for i in range(len(do_blotches)-1):
-            # Check that we should blotch and sep_coords is on same row
-            if sep_coords[i+1][0]==sep_coords[i][0] and do_blotches[i]:
+        for i in range(len(sep_coords)-1):
+            # Check to blotch and both sep_coords are on same row
+            row,col = sep_coords[i]
+            if sep_coords[i+1][0]==row and do_blotches[row,col]:
                 if allow_contig or not is_contig:
-                    row,col = sep_coords[i]
                     _,stop_col = sep_coords[i+1]
                     mask[row, col+1:stop_col+1] = True
                     is_contig = True
@@ -796,7 +970,7 @@ def loss_and_acc(preds, labels, attn, loss_fxn, loss_scale=1,top_k=None):
 
 if __name__=="__main__":
     #def blotch(idxs, sep_idx, blotch_p=0.4, indy_blotching=False):
-    sep_idx = 1
+    sep_idx = 0
     blotch_p = 0.25
     n_samples = 5000
     slen = 20
@@ -807,28 +981,32 @@ if __name__=="__main__":
     idxs[2:,1:-1:2] = sep_idx
     print("Idxs:", idxs)
 
+    blotches = torch.ones(len(idxs))*torch.FloatTensor([
+        0.1, 0.3, 0.6, 0.9
+    ])
     bmask = get_blotch_mask(
         idxs,
         sep_idx=sep_idx,
-        blotch_p=blotch_p,
+        blotch_p=blotches,
         allow_contig=allow_contig
     )
     print("blotch:", bmask)
-    print("Blotched Idxs:")
     for row in range(idxs.shape[0]):
         print()
         print("Unblotched:", idxs[row])
         print("Mask:", bmask[row])
         print("Blotched:", idxs[row][~bmask[row]])
+    print("bmask p:", bmask.float().sum()/2/(idxs==sep_idx).float().sum())
 
     idxs = torch.randint(2,9, size=(n_samples,slen))
     idxs[:2,:-1:2] = sep_idx
     idxs[2:,1:-1:2] = sep_idx
 
+    blotches = torch.ones(len(idxs))*blotch_p
     bmask = get_blotch_mask(
         idxs,
         sep_idx=sep_idx,
-        blotch_p=blotch_p,
+        blotch_p=blotches,
         allow_contig=allow_contig
     )
     print("bmask p:", bmask.float().sum()/2/(idxs==sep_idx).float().sum())

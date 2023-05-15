@@ -147,7 +147,21 @@ then running the following command:
     "blotch_p": float
         the blotch probability. 0 means no blotching. blotching is
         effectively contiguous dropout. It is kept to complete
-        sequences, however, rather than fully random.
+        sequences, however, rather than fully random. If using a
+        BlotchTokenModel, use `blotch_p_min` and `blotch_p_max` instead.
+    "blotch_p_min": float
+        sets the minimum amount of blotching for a model.
+    "blotch_p_max": float
+        sets the maximum amount of blotching for a model.
+    "n_btokens": int or None
+        the number of blotch tokens. This is effectively a
+        granularity parameter for blotch values. If None, will
+        default to blotch_p increments of 0.1 on the difference
+        of bp_max and bp_min. For example, if bp_max-bp_min is
+        0.4, then there will be 0.4/0.1 = 4 tokens
+    "bootstrap_blotch_p": float
+        the amount of blotching to use for the bootstrapping phases.
+        only applies to BlotchTokenModel type.
     "contig_blotches": bool
         if true, will allow contiguous blotches. If false, will
         separate blotch segments by at least one semantic step

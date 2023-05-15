@@ -695,7 +695,7 @@ class Runner:
             for i in range(0,len(inpts),bsize):
                 startx = i
                 endx = i+bsize
-                logits = model(
+                ret_dict = model(
                     inpts[startx:endx].to(device),
                     pad_mask=pad_mask[startx:endx].to(device),
                     is_causal=True,
@@ -703,7 +703,9 @@ class Runner:
                     n_steps=self.shared_exp.shape[1]-inpts.shape[1]-1,
                     temperature=self.hyps.get("temperature", 1),
                     incl_all_inpts=True,
+                    blotch_p=self.hyps.get("bootstrap_blotch_p", 0)
                 )
+                logits = ret_dict["preds"]
                 preds = torch.argmax(logits, dim=-1)
                 preds[:,-1] = self.tokenizer.eos_idx
                 ends = torch.argmax(
@@ -783,7 +785,7 @@ def augment_data(
             pad_mask = inpts==pad
             outputs = data[:,1:].to(model.get_device())
 
-            logits = model(
+            ret_dict = model(
                 inpts[:,:plen+1].to(device),
                 pad_mask=pad_mask[:,:plen+1].to(device),
                 is_causal=True,
@@ -792,7 +794,9 @@ def augment_data(
                 n_steps=data_cache.shape[1]-plen-2,
                 temperature=hyps.get("temperature", 1),
                 incl_all_inpts=True,
+                blotch_p=hyps.get("bootstrap_blotch_p", 0)
             )
+            logits = ret_dict["preds"]
             preds = torch.argmax(logits, dim=-1)
             if hyps["exp_name"] == "test": 
                 preds[:,1:] = outputs.clone()
