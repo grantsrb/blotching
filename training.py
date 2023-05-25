@@ -20,6 +20,7 @@ SOS = "|<SOS>|"
 def train(rank, hyps, verbose=True, *args, **kwargs):
     # Distributed Set Up
     torch.cuda.empty_cache()
+    hyps = hyper_error_catching(hyps)
     hyps["multi_gpu"] = hyps.get("multi_gpu", False)
     if hyps["multi_gpu"]:
         world_size = hyps.get("n_gpus", 1)
@@ -282,8 +283,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         div = (i+1)
         train_loss = round(avg_loss/div, 5)
         train_acc  = round(avg_acc/div, 5)
-        train_len_diff = round(avg_len_diff/i,5)
-        train_len_perc = round(avg_len_perc/i,5)
+        train_len_diff = round(avg_len_diff/div,5)
+        train_len_perc = round(avg_len_perc/div,5)
         if rank==0 and verbose:
             print()
             s = "Example Predictions On Training"
@@ -650,3 +651,15 @@ def make_model(hyps):
         checkpt = ml_utils.save_io.load_checkpoint(init_checkpt)
         model.load_state_dict(checkpt["state_dict"])
     return model
+
+def hyper_error_catching(hyps):
+    """
+    This function just makes sure that some obvious hyperparameter
+    choices are set and some obviously wrong hyperparameter settings
+    are changed to what the experimenter meant.
+    """
+    if not hyps["blotch_p"] and not hyps.get("blotch_p_min", None) and\
+            not hyps.get("blotch_p_max", None):
+        hyps["model_type"] = "TransformerModel"
+    return hyps
+
