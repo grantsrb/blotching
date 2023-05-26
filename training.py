@@ -313,7 +313,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         val_correct =  0
         val_dict = {
             "val_loss":     [], "val_acc":      [], "val_len_diff": [],
-            "val_len_perc": [], "val_correct":  [],
+            "val_len_perc": [], "val_correct":  [], "blotch_p": [],
         }
         if rank==0 and (epoch%val_mod==0 or epoch==n_epochs-1):
             ddp_model.eval()
@@ -324,8 +324,14 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 nloops = hyps.get("max_val_loops",None)
                 if nloops is None: nloops = len(iterable)
                 nloops = min(nloops, len(iterable))
-                blotch_ps=np.arange(max(model.n_btokens,1))/model.bp_gran
+                if hyps["model_type"]=="TransformerModel":
+                    blotch_ps = [0.0]
+                elif hyps["exp_name"]=="test": blotch_ps = [0]
+                else:
+                    blotch_ps = np.arange(max(model.n_btokens//2,1))*2
+                    blotch_ps = blotch_ps/model.bp_gran
                 for bp in blotch_ps:
+                    print("\nBlotch P:", bp)
                     avg_loss = 0
                     avg_acc = 0
                     avg_len_diff = 0
@@ -364,12 +370,11 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                             avg_acc += acc.item()
                             avg_len_diff += len_diff.item()
                             avg_len_perc += len_perc.item()
-                    if hyps["exp_name"]=="test" and i>=3: break
-                    if i>=nloops-l: break
-                    if verbose:
-                        p = round(100*(i+1)/nloops, 2)
-                        t = round(time.time()-starttime, 4)
-                        print("{}% -- {}s".format(p,t), end="         \r")
+                        if verbose:
+                            p = round(100*(i+1)/nloops, 2)
+                            t = round(time.time()-starttime, 4)
+                            print("{}% -- {}s".format(p,t), end="         \r")
+                        if i>=nloops-l: break
                     div = (i+1)
                     val_dict["val_loss"].append(round(avg_loss/div, 5))
                     val_dict["val_acc"].append(round(avg_acc/div, 5))
@@ -384,6 +389,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                         val_len_diff = round(avg_len_diff/div, 5)
                         val_len_perc = round(avg_len_perc/div, 5)
                         val_correct =  round(avg_correct/div, 5)
+                    if hyps["exp_name"]=="test": break
             if verbose:
                 print()
                 s = "Example Predictions On Validation"
@@ -409,30 +415,38 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 s = "Train Loss: {} - Train Acc: {}".format(
                     train_loss,train_acc
                 )
-                print(s)
                 logstr += s + "\n"
+                print(s)
 
-                s = "Val Loss: {} - Val Acc: {}".format(
-                    val_loss,val_acc
-                )
-                print(s)
-                logstr += s + "\n"
+                for i in range(len(val_dict["val_loss"])):
+                    s = "Blotch P: {}".format(val_dict["blotch_p"][i])
+                    logstr += s + "\n"
+                    print(s)
 
-                s = "Train LDiff: {} - Val LDiff: {}".format(
-                    train_len_diff,val_len_diff
-                )
-                print(s)
-                logstr += s + "\n"
+                    s = "\tVal Loss: {} - Val Acc: {}".format(
+                        val_dict["val_loss"][i],
+                        val_dict["val_acc"][i],
+                    )
+                    logstr += s + "\n"
+                    print(s)
 
-                s = "Train Len%: {} - Val Len%: {}".format(
-                    train_len_perc,val_len_perc
-                )
-                print(s)
-                logstr += s + "\n"
+                    s = "\tVal Correct: {}".format(
+                        val_dict["val_correct"][i]
+                    )
+                    logstr += s + "\n"
+                    print(s)
 
-                s = "Val Correct: {}".format( val_correct )
-                print(s)
-                logstr += s + "\n"
+                    s = "\tTrain LDiff: {} - Val LDiff: {}".format(
+                        train_len_diff,val_dict["val_len_diff"][i]
+                    )
+                    print(s)
+                    logstr += s + "\n"
+
+                    s = "\tTrain Len%: {} - Val Len%: {}".format(
+                        train_len_perc,val_dict["val_len_perc"][i]
+                    )
+                    print(s)
+                    logstr += s + "\n"
 
 
                 s = "Epoch Dur: {}s".format(round(time.time()-epochtime))
