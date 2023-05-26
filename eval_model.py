@@ -155,62 +155,70 @@ if __name__=="__main__":
             "prob_str": [],
             "soln_str": [],
             "label_str": [],
+            "b_p": [],
         }
         plen = data_cache.prob_len
         if verbose and rank==0: print("Evaluating Model")
         n_loops = len(iter(data_cache))
-        for i,data in enumerate(data_cache):
-            start_time = time.time()
-            if "meta_data" in data:
-                meta_data = data["meta_data"]
-            if not hyps["model_parallel"]:
-                data["input_ids"] = data["input_ids"].to(rank)
-                data["output_ids"] = data["output_ids"].to(rank)
-            with torch.no_grad():
-                wrapped_model.eval()
-                model.eval()
+        if hyps["model_type"]=="TransformerModel":
+            bps = [0.0]
+        else:
+            bps = np.arange(max(model.n_btokens,1))/model.bp_gran
+        for blotch_p in bps:
+            print("\nBp:", blotch_p)
+            for i,data in enumerate(data_cache):
+                start_time = time.time()
+                if "meta_data" in data:
+                    meta_data = data["meta_data"]
+                if not hyps["model_parallel"]:
+                    data["input_ids"] = data["input_ids"].to(rank)
+                    data["output_ids"] = data["output_ids"].to(rank)
+                with torch.no_grad():
+                    wrapped_model.eval()
+                    model.eval()
 
-                package = wrapped_model(
-                    data,
-                    ret_preds=True,
-                    seq_len=hyps["seq_len"],
-                    tforce=False,
-                    prob_len=plen,
-                    no_grad=True,
-                    incl_all_inpts=True,
-                    blotch_p=0
-                )
-                pred_ids = package["preds"]
-
-                probs = meta_data["probs"]
-                solns =  meta_data["solns"]
-                labels =  meta_data["labels"]
-                for prob,soln,label in zip(probs, solns,labels):
-                    df_dict["targ"].append(
-                     soln.split(tokenizer.eos)[0].split(tokenizer.sep)[-1]
+                    package = wrapped_model(
+                        data,
+                        ret_preds=True,
+                        seq_len=hyps["seq_len"],
+                        tforce=False,
+                        prob_len=plen,
+                        no_grad=True,
+                        incl_all_inpts=True,
+                        blotch_p=blotch_p,
                     )
-                    df_dict["soln_str"].append(soln[1:]) # removes =
-                    df_dict["prob_str"].append(prob)
-                    df_dict["label_str"].append(label)
+                    pred_ids = package["preds"]
 
-                stats = get_stats(tokenizer=tokenizer, ids=pred_ids)
-                df_dict["ans"]      += stats["resp"]
-                df_dict["pred_str"] += stats["pred"]
+                    probs = meta_data["probs"]
+                    solns =  meta_data["solns"]
+                    labels =  meta_data["labels"]
+                    for prob,soln,label in zip(probs, solns,labels):
+                        df_dict["targ"].append(
+                         soln.split(tokenizer.eos)[0].split(tokenizer.sep)[-1]
+                        )
+                        df_dict["soln_str"].append(soln[1:]) # removes =
+                        df_dict["prob_str"].append(prob)
+                        df_dict["label_str"].append(label)
+                        df_dict["b_p"].append(blotch_p)
 
-                out_ids = data["output_ids"][:,plen:]
-                acc = pred_ids[:,plen+1:]==out_ids
-                out_pad_mask = out_ids==tokenizer.pad_idx
-                acc[out_pad_mask] = 0
-                acc = acc.float().sum(-1)
-                acc = acc / (~out_pad_mask).sum(-1)
-                df_dict["tok_acc"].append(acc.cpu().data.numpy())
-                print(
-                    "{}% - {}s".format(
-                        int((i+1)/n_loops*100),
-                        round(time.time()-start_time, 2)
-                    ),
-                    end="                  \r"
-                )
+                    stats = get_stats(tokenizer=tokenizer, ids=pred_ids)
+                    df_dict["ans"]      += stats["resp"]
+                    df_dict["pred_str"] += stats["pred"]
+
+                    out_ids = data["output_ids"][:,plen:]
+                    acc = pred_ids[:,plen+1:]==out_ids
+                    out_pad_mask = out_ids==tokenizer.pad_idx
+                    acc[out_pad_mask] = 0
+                    acc = acc.float().sum(-1)
+                    acc = acc / (~out_pad_mask).sum(-1)
+                    df_dict["tok_acc"].append(acc.cpu().data.numpy())
+                    print(
+                        "{}% - {}s".format(
+                            int((i+1)/n_loops*100),
+                            round(time.time()-start_time, 2)
+                        ),
+                        end="                  \r"
+                    )
 
         df_dict["tok_acc"] = np.concatenate(df_dict["tok_acc"], axis=0)
         print("Making pandas dataframe")

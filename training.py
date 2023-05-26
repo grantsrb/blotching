@@ -306,11 +306,15 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         #############################################################
         # Validation
         #############################################################
-        avg_loss = 0
-        avg_acc = 0
-        avg_len_diff = 0
-        avg_len_perc = 0
-        avg_correct = 0
+        val_loss =     0
+        val_acc =      0
+        val_len_diff = 0
+        val_len_perc = 0
+        val_correct =  0
+        val_dict = {
+            "val_loss":     [], "val_acc":      [], "val_len_diff": [],
+            "val_len_perc": [], "val_correct":  [],
+        }
         if rank==0 and (epoch%val_mod==0 or epoch==n_epochs-1):
             ddp_model.eval()
             if verbose:
@@ -320,49 +324,66 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 nloops = hyps.get("max_val_loops",None)
                 if nloops is None: nloops = len(iterable)
                 nloops = min(nloops, len(iterable))
-                for i,data in enumerate(val_cache):
-                    starttime = time.time()
-                    if not hyps["model_parallel"]:
-                        data = {k: v.to(rank) for k,v in data.items()}
-                    package = ddp_model(
-                        data,
-                        ret_preds=True,
-                        tforce=False,
-                        seq_len=hyps["seq_len"],
-                        prob_len=val_cache.prob_len,
-                        incl_intl_prob=hyps.get("incl_intl_prob", False),
-                        blotch_p=hyps.get("bootstrap_blotch_p", 0)
-                    )
-                    loss = package["loss"]
-                    acc = package["acc"]
-                    len_diff = package["len_diff"]
-                    len_perc = package["len_percent"]
-                    preds = package["preds"]
+                blotch_ps=np.arange(max(model.n_btokens,1))/model.bp_gran
+                for bp in blotch_ps:
+                    avg_loss = 0
+                    avg_acc = 0
+                    avg_len_diff = 0
+                    avg_len_perc = 0
+                    avg_correct = 0
+                    for i,data in enumerate(val_cache):
+                        starttime = time.time()
+                        if not hyps["model_parallel"]:
+                            data = {
+                                k: v.to(rank) for k,v in data.items()
+                            }
+                        package = ddp_model(
+                            data,
+                            ret_preds=True,
+                            tforce=False,
+                            seq_len=hyps["seq_len"],
+                            prob_len=val_cache.prob_len,
+                            incl_intl_prob=hyps.get("incl_intl_prob", False),
+                            blotch_p=bp
+                        )
+                        loss = package["loss"]
+                        acc = package["acc"]
+                        len_diff = package["len_diff"]
+                        len_perc = package["len_percent"]
+                        preds = package["preds"]
 
-                    corrects = check_correct(
-                        tokenizer,
-                        data["output_ids"],
-                        preds,
-                    )
-                    avg_correct += corrects.mean().item()
+                        corrects = check_correct(
+                            tokenizer,
+                            data["output_ids"],
+                            preds,
+                        )
 
-                    avg_loss += loss.item()
-                    avg_acc += acc.item()
-                    avg_len_diff += len_diff.item()
-                    avg_len_perc += len_perc.item()
+                        if bp==0:
+                            avg_correct += corrects.mean().item()
+                            avg_loss += loss.item()
+                            avg_acc += acc.item()
+                            avg_len_diff += len_diff.item()
+                            avg_len_perc += len_perc.item()
                     if hyps["exp_name"]=="test" and i>=3: break
                     if i>=nloops-l: break
                     if verbose:
                         p = round(100*(i+1)/nloops, 2)
                         t = round(time.time()-starttime, 4)
                         print("{}% -- {}s".format(p,t), end="         \r")
-            div = (i+1)
-            val_loss = round(avg_loss/div, 5)
-            val_acc = round(avg_acc/div, 5)
-            val_len_diff = round(avg_len_diff/div, 5)
-            val_len_perc = round(avg_len_perc/div, 5)
-            val_correct = round(avg_correct/div, 5)
-
+                    div = (i+1)
+                    val_dict["val_loss"].append(round(avg_loss/div, 5))
+                    val_dict["val_acc"].append(round(avg_acc/div, 5))
+                    val_dict["val_len_diff"].append(round(avg_len_diff/div, 5))
+                    val_dict["val_len_perc"].append(round(avg_len_perc/div, 5))
+                    val_dict["val_correct"].append(round(avg_correct/div, 5))
+                    val_dict["blotch_p"].append(bp)
+                    if bp==0:
+                        div = (i+1)
+                        val_loss =     round(avg_loss/div, 5)
+                        val_acc =      round(avg_acc/div, 5)
+                        val_len_diff = round(avg_len_diff/div, 5)
+                        val_len_perc = round(avg_len_perc/div, 5)
+                        val_correct =  round(avg_correct/div, 5)
             if verbose:
                 print()
                 s = "Example Predictions On Validation"
@@ -485,6 +506,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     "val_len_diff":val_len_diff,
                     "val_len_perc":val_len_perc,
                     "val_correct": val_correct,
+                    "val_dict": val_dict,
                     "n_new_samps": n_new_samps,
                     "n_aug_samps": n_aug_samps,
                     "state_dict":  model.state_dict(),
