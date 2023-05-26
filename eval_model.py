@@ -59,7 +59,7 @@ if __name__=="__main__":
     max_num = None # override the max_num given by the hyps.
     # Integer argument if you want to randomly sample n problems rather
     # than systematically looking at all possible problems.
-    rand_samps = 1000
+    rand_samps = 100
 
     if testing: print("CURRENTLY IN TESTING MODE!!!!")
 
@@ -72,7 +72,7 @@ if __name__=="__main__":
                 model_folders += io.get_model_folders(
                     arg,incl_full_path=True
                 )
-        elif "overwrite" in arg:
+        elif "overwrite" in arg or "override" in arg:
             overwrite = True
         else:
             try:
@@ -219,6 +219,12 @@ if __name__=="__main__":
                         ),
                         end="                  \r"
                     )
+                    print("Avg Token Acc:", df_dict["tok_acc"][-1].mean())
+                    correct = np.mean([
+                      stats["resp"][-j]==df_dict["targ"][-j] for j in\
+                            reversed(range(1, len(stats["resp"])+1))
+                    ])
+                    print("Avg Correct:", correct)
 
         df_dict["tok_acc"] = np.concatenate(df_dict["tok_acc"], axis=0)
         print("Making pandas dataframe")
