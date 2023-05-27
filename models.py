@@ -92,7 +92,7 @@ class Model(torch.nn.Module):
         self.bp_diff = self.bp_max - self.bp_min
         self.n_btokens = n_btokens
         if n_btokens is None:
-            self.bp_gran = 10 # the granularity of the blotch p
+            self.bp_gran = 11 # the granularity of the blotch p
             # the blotch token values will be divided by this value
             # to determine the actual blotch p
             self.n_btokens = max(int(self.bp_diff*self.bp_gran), 1)
