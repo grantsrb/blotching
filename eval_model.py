@@ -59,7 +59,7 @@ if __name__=="__main__":
     max_num = None # override the max_num given by the hyps.
     # Integer argument if you want to randomly sample n problems rather
     # than systematically looking at all possible problems.
-    rand_samps = 100
+    rand_samps = 3000
 
     if testing: print("CURRENTLY IN TESTING MODE!!!!")
 

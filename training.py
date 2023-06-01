@@ -458,6 +458,9 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             keys = list(data.keys())
             for k in keys: del data[k]
 
+        ##############################################################
+        #### STaR BOOTSTRAPPING
+        ##############################################################
         n_new_samps = 0
         if hyps.get("star",False) and epoch>=hyps.get("pre_epochs", 3):
             if rank==0 and verbose:
@@ -483,6 +486,9 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             # updates the collection model with the most recent weights
             collector.update_model(model)
 
+        ##############################################################
+        #### DATA AUGMENTATIONS
+        ##############################################################
         n_aug_samps = 0
         if hyps.get("aug_loops",0)>0 and epoch>=hyps.get("pre_epochs",3):
             print("Augmenting Dataset")
