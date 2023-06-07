@@ -1,9 +1,12 @@
+import time
 import torch
 import torch.multiprocessing as mp
 import envs
 import copy
 import numpy as np
 from tqdm import tqdm
+import utils
+import math
 
 class DataIterable:
     def __init__(self, data, batch_size=128, meta_data=None):
@@ -57,7 +60,8 @@ class DataIterable:
 
 class DataCache(torch.utils.data.Dataset):
     """
-    Handles storing the data
+    Handles storing the data. Stores data as a single tensor. Then
+    returns data as a dict with keys "input_ids" and "output_ids"
     """
     def __init__(self, max_samples=100000,
                        seq_len=100,
@@ -728,6 +732,135 @@ class Runner:
                             preds[i,idx:] = self.tokenizer.pad_idx
                 self.shared_exp[startx:endx,:] = preds
 
+def reduce_data(
+        hyps,
+        wrapped_model,
+        data_cache,
+        tokenizer,
+        in_place=False,
+        verbose=True
+    ):
+    """
+    Takes the data from a data cache and attempts to remove semantic
+    segments by ablating steps and checking the resulting perplexity
+    on the the continuation of the sample.
+
+    Args:
+        hyps: dict
+            val_batch_size: int
+                the batch size for the augmentation loop
+            ablate_rel_tolerance: float
+                the maximum change in loss to remove a step for a sample
+        wrapped_model: LossWrapper
+        data_cache: DataCache
+        tokenizer: Tokenizer
+        in_place: bool
+            if true, will change samples in place, replacing them
+            within the data cache. If False, will not replace in
+            place but will still return a copy of the augmented samples.
+    Returns:
+        aug_data: list of torch tensor [(A,S), (A1,S), ...]
+            a list of variable length tensors that are the augmented
+            samples.
+    """
+    tol = hyps.get("axe_tol")
+    bsize = hyps.get("val_batch_size", 500)
+    n_loops = hyps.get("ablate_loops", 3)
+    plen = data_cache.prob_len
+    device = wrapped_model.model.get_device()
+    pad = tokenizer.pad_idx
+    eos = tokenizer.eos_idx
+    sep = tokenizer.sep_idx
+    ans_len = len(str(hyps["max_val"]))
+
+    aug_data = []
+    # Aranges will help with indexing for padding and other things
+    aranges = torch.arange(data_cache.shape[1])[None].repeat(
+        (bsize, 1)
+    ).to(device)
+    with torch.no_grad():
+        perm = torch.randperm(len(data_cache)).long()
+        rng = range(min(n_loops, len(data_cache)//bsize))
+        if verbose: rng = tqdm(rng)
+        for i in rng:
+            startx = i*bsize
+            endx = startx+bsize
+            permxs = perm[startx:endx] # Used later in the in_place op
+            ids = data_cache.cache[permxs]
+            outputs = ids[:,1:].to(device)
+            inpts = ids[:,:-1].to(device)
+            inpt_pad_mask = ((inpts==pad)|(inpts==eos)).to(device)
+            out_pad_mask = (outputs==pad)
+            data = {
+                "input_ids": inpts,
+                "output_ids": outputs,
+                "out_pad_mask": out_pad_mask.clone()
+            }
+
+            # Subtract 1 to remove because there will always be at
+            # least a single separator
+            sep_sums = torch.sum(inpts==sep, dim=-1)-1
+            max_seps = torch.max(sep_sums)
+            losses = []
+            masks = []
+            for i in range(max_seps):
+                blotch_mask = utils.get_blotch_mask(
+                    inpts,
+                    sep_idx=sep,
+                    step_idx=i,
+                )
+                data["inpt_pad_mask"] = inpt_pad_mask|blotch_mask
+                data["out_pad_mask"][:,:-1] = out_pad_mask[:,:-1]|\
+                                              blotch_mask[:,1:]
+                ret_dict = wrapped_model(
+                    data,
+                    tforce=True,
+                    no_grad=True,
+                    prob_len=plen,
+                    reduce_metrics=False,
+                    ret_preds=True,
+                )
+                pred_ids = ret_dict["preds"]
+                was_correct = utils.vectorized_check_correct(
+                    tokenizer, data["output_ids"], pred_ids
+                )
+                did_blotch = sep_sums>i
+                loss = ret_dict["loss"].to(device)
+                loss[~(was_correct&did_blotch)] = math.inf
+                losses.append(loss.cpu())
+
+            losses = torch.stack(losses, dim=-1)
+            best_losses, best_steps = torch.max(-losses, dim=-1)
+            idxs = (best_losses<math.inf)&(best_losses<tol)
+            new_data = ids[idxs]
+            axe_idxs = utils.get_blotch_mask(
+                new_data,
+                sep_idx=sep,
+                step_idx=best_steps[idxs],
+            )
+            new_data[axe_idxs] = tokenizer.pad_idx
+
+            # Add data to list, and cache if in_place
+            if len(new_data) > 0:
+                aug_data.append(new_data)
+                if in_place:
+                    idxs = idxs.cpu()
+                    data_cache.cache[permxs[idxs], :] = new_data.cpu()
+    return aug_data
+
+def axe_step(ids, steps):
+    """
+    Removes the specified semantic step from the ids by replacing
+    it with padding.
+
+    Args:
+        ids: torch LongTensor (B,N)
+        steps: torch LongTensor (B,)
+    Returns:
+        rem_ids: torch LongTensor (B,N)
+            the remaining ids after the axing
+    """
+
 def augment_data(
         hyps,
         model,
@@ -816,22 +949,26 @@ def augment_data(
             pad_idxs = aranges>pred_ends[:,None]
             preds[pad_idxs] = pad
 
-            # Find last separator and eos to determine window of answer.
-            # Then use sum of matching tokens to determine if correct.
-            seps = outputs==sep
-            last_sep_idxs = torch.argsort(
-                seps.long(), dim=-1, descending=True
-            )[torch.arange(len(seps)).long(), seps.sum(-1).long()-1]
-            soln_ends = soln_ends[:,None]
-            soln_lens = soln_ends - last_sep_idxs[:,None]
-            soln_idxs =(aranges<soln_ends)&(aranges>=(soln_ends-soln_lens))
-            ans_idxs = (aranges < pred_ends[:,None])&\
-                       (aranges>=(pred_ends[:,None]-soln_lens))
-            corrects = torch.zeros_like(outputs).float()
-            idx = preds[ans_idxs]==outputs[soln_idxs[:,:-1]]
-            corrects[soln_idxs[:,:-1]] = (idx).float()
-            corrects = corrects.sum(-1)
-            corrects = corrects.squeeze()==soln_lens.squeeze()
+            corrects = utils.vectorized_check_correct(
+                tokenizer, outputs, pred_ids=preds
+            )
+            ## Find last separator and eos to determine window of answer.
+            ## Then use sum of matching tokens to determine if correct.
+            #seps = outputs==sep
+
+            #last_sep_idxs = torch.argsort(
+            #    seps.long(), dim=-1, descending=True
+            #)[torch.arange(len(seps)).long(), seps.sum(-1).long()-1]
+            #soln_ends = soln_ends[:,None]
+            #soln_lens = soln_ends - last_sep_idxs[:,None]
+            #soln_idxs =(aranges<soln_ends)&(aranges>=(soln_ends-soln_lens))
+            #ans_idxs = (aranges < pred_ends[:,None])&\
+            #           (aranges>=(pred_ends[:,None]-soln_lens))
+            #corrects = torch.zeros_like(outputs).float()
+            #idx = preds[ans_idxs]==outputs[soln_idxs[:,:-1]]
+            #corrects[soln_idxs[:,:-1]] = (idx).float()
+            #corrects = corrects.sum(-1)
+            #corrects = corrects.squeeze()==soln_lens.squeeze()
             idx = shorts&corrects
             p = preds[idx].data.cpu()
 

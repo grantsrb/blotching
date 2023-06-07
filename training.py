@@ -8,6 +8,7 @@ from tqdm import tqdm
 import os
 
 import ml_utils
+import utils
 import datas
 import models
 from envs import MathEnv
@@ -216,7 +217,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             package = ddp_model(
                 data,
                 ret_preds=True,
-                seq_len=hyps["seq_len"],
                 tforce=True,
                 prob_len=data_cache.prob_len,
                 incl_intl_prob=hyps.get("incl_intl_prob", False)
@@ -358,11 +358,11 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                         len_perc = package["len_percent"]
                         preds = package["preds"]
 
-                        corrects = check_correct(
+                        corrects = utils.vectorized_check_correct(
                             tokenizer,
                             data["output_ids"],
                             preds,
-                        )
+                        ).float()
 
                         if bp==0:
                             avg_correct += corrects.mean().item()
@@ -512,6 +512,33 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     print(e)
                     print("Issue viewing new samples")
 
+        ##############################################################
+        #### SELECTIVE Axing
+        ##############################################################
+        n_axed = 0
+        if hyps.get("axe_loops",0)>0 and epoch>=hyps.get("pre_epochs",3):
+            print("Axing Data Samples")
+            axed_samps = datas.reduce_data(
+                hyps=hyps,
+                wrapped_model=wrapped_model,
+                data_cache=data_cache,
+                tokenizer=tokenizer,
+                in_place=True,
+                verbose=rank==0 and verbose
+            )
+            n_axed = sum([len(x) for x in axed_samps])
+            if rank==0 and verbose:
+                try:
+                    print("Axed samples:", n_axed)
+                    if n_axed>0:
+                        print("Examples:")
+                        examps = tokenizer.decode(axed_samps[0][:5])
+                        for e,ex in enumerate(examps):
+                            print(e,"-",ex.replace(tokenizer.pad, ""))
+                except Exception as e:
+                    print(e)
+                    print("Issue viewing new samples")
+
         if rank==0 and epoch%val_mod==0:
             if hyps.get( "save", True ):
                 save_dict = {
@@ -529,6 +556,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     "val_dict": val_dict,
                     "n_new_samps": n_new_samps,
                     "n_aug_samps": n_aug_samps,
+                    "n_axed": n_axed,
                     "state_dict":  model.state_dict(),
                     "optim_dict":  optimizer.state_dict(),
                     "hyps":        hyps,
@@ -551,30 +579,30 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         collector.terminate_procs()
         collector.dispatch_runners()
 
-def check_correct(tokenizer, output_ids, pred_ids):
-    """
-    Determines whether or not the outputs are correct for each row
-    of the inputs.
-
-    Arguments:
-        tokenizer: Tokenizer
-        output_ids: torch LongTensor (N,S)
-        pred_ids: torch LongTensor (N,T)
-    Returns:
-        corrects: Bool Tensor (N,)
-            True values indicate that the final output of the row was
-            correctly predicted.
-    """
-    targs = tokenizer.decode(output_ids)
-    preds = tokenizer.decode(pred_ids)
-    corrects = torch.zeros(len(preds))
-    eos = tokenizer.eos
-    sep = tokenizer.sep
-    for i,(targ,pred) in enumerate(zip(targs, preds)):
-        t = targ.split(eos)[0].split(sep)[-1]
-        p = pred.split(eos)[0].split(sep)[-1]
-        corrects[i] = t==p
-    return corrects
+#def check_correct(tokenizer, output_ids, pred_ids):
+#    """
+#    Determines whether or not the outputs are correct for each row
+#    of the inputs.
+#
+#    Arguments:
+#        tokenizer: Tokenizer
+#        output_ids: torch LongTensor (N,S)
+#        pred_ids: torch LongTensor (N,T)
+#    Returns:
+#        corrects: Bool Tensor (N,)
+#            True values indicate that the final output of the row was
+#            correctly predicted.
+#    """
+#    targs = tokenizer.decode(output_ids)
+#    preds = tokenizer.decode(pred_ids)
+#    corrects = torch.zeros(len(preds))
+#    eos = tokenizer.eos
+#    sep = tokenizer.sep
+#    for i,(targ,pred) in enumerate(zip(targs, preds)):
+#        t = targ.split(eos)[0].split(sep)[-1]
+#        p = pred.split(eos)[0].split(sep)[-1]
+#        corrects[i] = t==p
+#    return corrects
 
 
 def print_examples(inpt_dict, tokenizer, n_samps=5):
