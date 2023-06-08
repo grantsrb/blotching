@@ -763,6 +763,7 @@ def reduce_data(
             a list of variable length tensors that are the augmented
             samples.
     """
+    wrapped_model.eval()
     tol = hyps.get("axe_tol")
     bsize = hyps.get("val_batch_size", 500)
     n_loops = hyps.get("ablate_loops", 3)
@@ -794,8 +795,26 @@ def reduce_data(
             data = {
                 "input_ids": inpts,
                 "output_ids": outputs,
+                "inpt_pad_mask": inpt_pad_mask,
                 "out_pad_mask": out_pad_mask.clone()
             }
+
+            # First check if the model will solve the problems without
+            # help
+            ret_dict = wrapped_model(
+                data,
+                tforce=False,
+                no_grad=True,
+                prob_len=plen,
+                ret_preds=True,
+            )
+            pred_ids = ret_dict["preds"]
+            was_correct = utils.vectorized_check_correct(
+                tokenizer, data["output_ids"], pred_ids
+            )
+            is_correct = utils.check_correct(
+                tokenizer, data["output_ids"], pred_ids
+            )
 
             # Subtract 1 to remove because there will always be at
             # least a single separator
@@ -803,15 +822,18 @@ def reduce_data(
             max_seps = torch.max(sep_sums)
             losses = []
             masks = []
-            for i in range(max_seps):
-                blotch_mask = utils.get_blotch_mask(
-                    inpts,
-                    sep_idx=sep,
-                    step_idx=i,
-                )
-                data["inpt_pad_mask"] = inpt_pad_mask|blotch_mask
-                data["out_pad_mask"][:,:-1] = out_pad_mask[:,:-1]|\
-                                              blotch_mask[:,1:]
+            for j in range(-1, max_seps):
+                if j>-1:
+                    blotch_mask = utils.get_blotch_mask(
+                        inpts,
+                        sep_idx=sep,
+                        step_idx=j,
+                    )
+                    did_blotch = sep_sums>j
+                    # TODO: Don't calculate unnecessary rows
+                    data["inpt_pad_mask"] = inpt_pad_mask|blotch_mask
+                    data["out_pad_mask"][:,:-1] = out_pad_mask[:,:-1]|\
+                                                  blotch_mask[:,1:]
                 ret_dict = wrapped_model(
                     data,
                     tforce=True,
@@ -820,32 +842,31 @@ def reduce_data(
                     reduce_metrics=False,
                     ret_preds=True,
                 )
-                pred_ids = ret_dict["preds"]
-                was_correct = utils.vectorized_check_correct(
-                    tokenizer, data["output_ids"], pred_ids
-                )
-                did_blotch = sep_sums>i
                 loss = ret_dict["loss"].to(device)
-                loss[~(was_correct&did_blotch)] = math.inf
-                losses.append(loss.cpu())
+                if j==-1:
+                    base_loss = loss
+                else:
+                    loss[~(was_correct&did_blotch)] = math.inf
+                    losses.append(((loss-base_loss)/base_loss).cpu())
 
             losses = torch.stack(losses, dim=-1)
             best_losses, best_steps = torch.max(-losses, dim=-1)
-            idxs = (best_losses<math.inf)&(best_losses<tol)
-            new_data = ids[idxs]
-            axe_idxs = utils.get_blotch_mask(
-                new_data,
-                sep_idx=sep,
-                step_idx=best_steps[idxs],
-            )
-            new_data[axe_idxs] = tokenizer.pad_idx
-
-            # Add data to list, and cache if in_place
-            if len(new_data) > 0:
-                aug_data.append(new_data)
-                if in_place:
-                    idxs = idxs.cpu()
-                    data_cache.cache[permxs[idxs], :] = new_data.cpu()
+            best_losses = -best_losses
+            idxs = (best_losses<tol)
+            if torch.any(idxs):
+                new_data = ids[idxs]
+                axe_idxs = utils.get_blotch_mask(
+                    new_data,
+                    sep_idx=sep,
+                    step_idx=best_steps[idxs],
+                )
+                new_data[axe_idxs] = tokenizer.pad_idx
+                # Add data to list, and cache if in_place
+                if len(new_data) > 0:
+                    aug_data.append(new_data)
+                    if in_place:
+                        idxs = idxs.cpu()
+                        data_cache.cache[permxs[idxs], :] = new_data.cpu()
     return aug_data
 
 def axe_step(ids, steps):
@@ -1128,6 +1149,7 @@ def get_validation_set(
         max_len=100,
         batch_size=128,
         rand_samps=None,
+        held_out_probs=set(),
         *args, **kwargs
     ):
     """
@@ -1152,6 +1174,8 @@ def get_validation_set(
         rand_samps: int or None
             integer argument if you want to randomly sample n problems
             rather than systematically looking at all possible problems.
+        held_out_probs: set of str
+            any problems that should be held out of the sampling
     Returns:
         data_cache: DataCache
     """
@@ -1160,9 +1184,17 @@ def get_validation_set(
     labels = []
     max_soln_len = 0
     if rand_samps:
+        prob_set = set()
         for i in range(rand_samps):
             prob = math_env.sample()
+            loop_count = 0
+            while (prob in held_out_probs or prob in prob_set) and\
+                                                    loop_count<100:
+                prob = math_env.sample()
+                loop_count += 1
+                if loop_count>=100: n_overlapping += 1
             probs.append(prob)
+            prob_set.add(prob)
     else:
         probs = envs.MathEnv.recursive_probs(
             prob="",
@@ -1171,9 +1203,7 @@ def get_validation_set(
         )
     print("Collecting Problem Solutions")
     for prob in tqdm(probs):
-        soln, labs = envs.MathEnv.find_soln(
-            prob,ret_labels=True
-        )
+        soln, labs = envs.MathEnv.find_soln( prob, ret_labels=True )
         labels.append(tokenizer.sep.join(labs))
         solns.append( tokenizer.sep + soln )
         if len(solns[-1])>max_soln_len:
@@ -1242,6 +1272,7 @@ def make_data_cache(probs,
                    batch_size=128,
                    max_samples=None,
                    ret_strings=False,
+                   incl_meta_data=False,
                    *args, **kwargs):
     """
     Creates a data_cache from the argued probs and solns
@@ -1263,14 +1294,19 @@ def make_data_cache(probs,
         ret_strings: bool
             if true, will return string versions of problems and
             solutions
+        incl_meta_data: bool
+            if true, will include the meta data in the data cache
     Returns:
         data_cache: DataCache
     """
+    labels = None
     if solns is None:
         solns = []
+        labels = []
         for prob in probs:
-            soln = envs.MathEnv.find_soln(prob)
-            solns.append(tokenizer.sep + soln)
+            soln, labs = envs.MathEnv.find_soln( prob, ret_labels=True )
+            labels.append(tokenizer.sep.join(labs))
+            solns.append( tokenizer.sep + soln )
     if plen is None:
         plen = np.max([len(p) for p in probs])
     if slen is None and seq_len is None:
@@ -1296,12 +1332,22 @@ def make_data_cache(probs,
     prob_len = prob_ids.shape[1]
     data = torch.cat([prob_ids, soln_ids], dim=1)
     if seq_len is None: seq_len = data.shape[-1]
-    data_cache = DataCache(
-        max_samples=max_samples,
-        seq_len=seq_len,
-        batch_size=batch_size,
-        init_data=data,
-        prob_len=prob_len
-    )
+    kwargs = {
+        "max_samples": max_samples,
+        "seq_len": seq_len,
+        "batch_size": batch_size,
+        "init_data": data,
+        "prob_len": prob_len,
+    }
+    if incl_meta_data:
+        kwargs["meta_data"] = {
+            "probs":  np.asarray(probs,  dtype="object"),
+            "solns":  np.asarray(solns,  dtype="object")
+        }
+        if labels is not None:
+            kwargs["meta_data"]["labels"] = np.asarray(
+                labels,dtype="object"
+            )
+    data_cache = DataCache( **kwargs )
     if ret_strings: return data_cache, probs, solns
     return data_cache
