@@ -850,8 +850,7 @@ def reduce_data(
                     losses.append(((loss-base_loss)/base_loss).cpu())
 
             losses = torch.stack(losses, dim=-1)
-            best_losses, best_steps = torch.max(-losses, dim=-1)
-            best_losses = -best_losses
+            best_losses, best_steps = torch.min(losses, dim=-1)
             idxs = (best_losses<tol)
             if torch.any(idxs):
                 new_data = ids[idxs]
