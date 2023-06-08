@@ -58,6 +58,7 @@ def vectorized_check_correct(
     """
     eos = tokenizer.eos_idx
     sep = tokenizer.sep_idx
+    pad = tokenizer.pad_idx
     device = pred_ids.get_device()
 
     pred_ids[:,-1] = eos
@@ -72,17 +73,34 @@ def vectorized_check_correct(
     # Finally we compare the masked preds and masked solns
     pred_ends = torch.argmax( (pred_ids==eos).long(), dim=-1 )
     soln_ends = torch.argmax( (output_ids==eos).long(),dim=-1 )
+
+    seps = (seps|((aranges<soln_ends[:,None])&(output_ids==pad))).long()
+
     last_sep_idxs = torch.argsort(
         seps.long(), dim=-1, descending=True
     )[torch.arange(len(seps)).long(), seps.sum(-1).long()-1]+int(has_conf)
     soln_ends = soln_ends[:,None]
     soln_lens = soln_ends - last_sep_idxs[:,None]
-    soln_idxs =(aranges<soln_ends)&(aranges>=(soln_ends-soln_lens))
-    ans_idxs = (aranges<pred_ends[:,None])&\
-               (aranges>=(pred_ends[:,None]-soln_lens))
+    soln_idxs = (aranges<soln_ends)&(aranges>=(soln_ends-soln_lens))
+    pred_ends = pred_ends[:,None]
+    ans_idxs = (aranges<pred_ends)&(aranges>=(pred_ends-soln_lens))
 
     corrects = torch.zeros_like(output_ids).float()
-    idx = pred_ids[ans_idxs]==output_ids[soln_idxs]
+    try:
+        idx = pred_ids[ans_idxs]==output_ids[soln_idxs]
+    except:
+        print("Error occurred in vectorized_check_correct")
+        differs = ans_idxs.float().sum(-1)!=soln_idxs.float().sum(-1)
+        preds = pred_ids[differs]
+        solns = output_ids[differs]
+        for j,(p,s) in enumerate(zip(preds,solns)):
+            print("Loop:", j)
+            print("Pred:", tokenizer.decode(p))
+            print("Soln:", tokenizer.decode(s))
+            print()
+        corrects = check_correct(tokenizer,output_ids,pred_ids,has_conf)
+        assert False
+        return corrects.to(device)
     corrects[soln_idxs] = (idx).float()
     corrects = corrects.sum(-1)
     corrects = corrects.squeeze()==soln_lens.squeeze()
