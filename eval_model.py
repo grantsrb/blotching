@@ -126,23 +126,35 @@ if __name__=="__main__":
 
         # Make dataset
         if verbose and rank==0: print("Collecting Data")
-        if max_num: math_env.max_num = max_num
-        elif testing: math_env.max_num = 10
-        cache_tup = (
-            math_env.max_num, math_env.max_ents, math_env.p_mult,
-            math_env.p_paren, math_env.space_mults
-        )
-        if cache_tup in data_caches:
-            data_cache = data_caches[cache_tup]
-        else:
-            data_cache = datas.get_validation_set(
-                math_env,
+        val_probs_file = os.path.join(model_folder, "val_probs.txt")
+        if os.path.exists(val_probs_file):
+            with open(val_probs_file, "r") as f:
+                probs = [p.strip() for p in f.readlines()]
+            data_cache = datas.make_data_cache(
+                probs,
                 tokenizer,
-                max_len=hyps["seq_len"],
+                seq_len=hyps["seq_len"],
                 batch_size=hyps["val_batch_size"],
-                rand_samps=rand_samps
+                incl_meta_data=True,
             )
-            data_caches[cache_tup] = data_cache
+        else:
+            if max_num: math_env.max_num = max_num
+            elif testing: math_env.max_num = 10
+            cache_tup = (
+                math_env.max_num, math_env.max_ents, math_env.p_mult,
+                math_env.p_paren, math_env.space_mults
+            )
+            if cache_tup in data_caches:
+                data_cache = data_caches[cache_tup]
+            else:
+                data_cache = datas.get_validation_set(
+                    math_env,
+                    tokenizer,
+                    max_len=hyps["seq_len"],
+                    batch_size=hyps["val_batch_size"],
+                    rand_samps=rand_samps
+                )
+                data_caches[cache_tup] = data_cache
         if verbose and rank==0:
             print("Total Samples:", len(data_cache))
 
@@ -189,8 +201,8 @@ if __name__=="__main__":
                     )
                     pred_ids = package["preds"]
 
-                    probs = meta_data["probs"]
-                    solns =  meta_data["solns"]
+                    probs =   meta_data["probs"]
+                    solns =   meta_data["solns"]
                     labels =  meta_data["labels"]
                     for prob,soln,label in zip(probs, solns,labels):
                         df_dict["targ"].append(
@@ -212,19 +224,19 @@ if __name__=="__main__":
                     acc = acc.float().sum(-1)
                     acc = acc / (~out_pad_mask).sum(-1)
                     df_dict["tok_acc"].append(acc.cpu().data.numpy())
+                    correct = np.mean([
+                      stats["resp"][-j]==df_dict["targ"][-j] for j in\
+                            reversed(range(1, len(stats["resp"])+1))
+                    ])
                     print(
-                        "{}% - {}s".format(
+                        "{TokAcc: {} - Correct: {} - {}% - {}s".format(
+                            df_dict["tok_acc"][-1].mean(),
+                            correct,
                             int((i+1)/n_loops*100),
                             round(time.time()-start_time, 2)
                         ),
                         end="                  \r"
                     )
-                    print("Avg Token Acc:", df_dict["tok_acc"][-1].mean())
-                    correct = np.mean([
-                      stats["resp"][-j]==df_dict["targ"][-j] for j in\
-                            reversed(range(1, len(stats["resp"])+1))
-                    ])
-                    print("Avg Correct:", correct)
 
         df_dict["tok_acc"] = np.concatenate(df_dict["tok_acc"], axis=0)
         print("Making pandas dataframe")
