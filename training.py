@@ -84,8 +84,9 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             batch_size=vbsize,
             ret_strings=True,
         )
+        train_probs = all_problems[val_len:]
         data_cache = datas.make_data_cache(
-            probs=all_problems[val_len:],
+            probs=train_probs,
             tokenizer=tokenizer,
             solns=None,
             plen=math_env.prob_len,
@@ -117,14 +118,15 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             "init_samples", hyps.get("max_samples",100000)
         )
         if not hyps["init_samples"]:hyps["init_samples"]=hyps["max_samples"]
-        data_cache = datas.get_data_cache(
+        data_cache, train_probs, _ = datas.get_data_cache(
             math_env=math_env,
             tokenizer=tokenizer,
             init_samples=hyps["init_samples"],
             seq_len=hyps["seq_len"],
             max_samples=hyps["max_samples"],
             batch_size=hyps["batch_size"],
-            held_out_probs=val_probs
+            held_out_probs=val_probs,
+            ret_strings=True,
         )
     if verbose and rank==0:
         print("Train Samples:", len(data_cache))
@@ -143,6 +145,9 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     if rank==0:
         ml_utils.training.record_session(hyps, model)
         sf = hyps['save_folder']
+        with open(os.path.join(sf,"train_probs.txt"),"w") as f:
+            for prob in train_probs:
+                f.write(prob + "\n")
         with open(os.path.join(sf,"val_probs.txt"),"w") as f:
             for prob in val_probs:
                 f.write(prob + "\n")
@@ -364,12 +369,11 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                             preds,
                         ).float()
 
-                        if bp==0:
-                            avg_correct += corrects.mean().item()
-                            avg_loss += loss.item()
-                            avg_acc += acc.item()
-                            avg_len_diff += len_diff.item()
-                            avg_len_perc += len_perc.item()
+                        avg_correct += corrects.mean().item()
+                        avg_loss += loss.item()
+                        avg_acc += acc.item()
+                        avg_len_diff += len_diff.item()
+                        avg_len_perc += len_perc.item()
                         if verbose:
                             p = round(100*(i+1)/nloops, 2)
                             t = round(time.time()-starttime, 4)
@@ -383,7 +387,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     val_dict["val_correct"].append(round(avg_correct/div, 5))
                     val_dict["blotch_p"].append(bp)
                     if bp==0:
-                        div = (i+1)
                         val_loss =     round(avg_loss/div, 5)
                         val_acc =      round(avg_acc/div, 5)
                         val_len_diff = round(avg_len_diff/div, 5)
@@ -513,7 +516,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     print("Issue viewing new samples")
 
         ##############################################################
-        #### SELECTIVE Axing
+        #### SELECTIVE AXING
         ##############################################################
         n_axed = 0
         if hyps.get("axe_loops",0)>0 and epoch>=hyps.get("pre_epochs",3):
@@ -531,14 +534,24 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 try:
                     print("Axed samples:", n_axed)
                     if n_axed>0:
-                        print("Examples:")
-                        examps = tokenizer.decode(axed_samps[0][:5])
-                        for e,ex in enumerate(examps):
-                            print(e,"-",ex.replace(tokenizer.pad, ""))
+                        fname = os.path.join(sf,"axed_samps.txt")
+                        with open(fname,"a") as f:
+                            f.write("\n\nEpoch: {}\n".format(epoch))
+                            print("Examples:")
+                            examps = tokenizer.decode(axed_samps[0][:5])
+                            for e,ex in enumerate(examps):
+                                s = "{} - {}".format(
+                                    e,ex.replace(tokenizer.pad, "")
+                                )
+                                print(s)
+                                f.write(s + "\n")
                 except Exception as e:
                     print(e)
                     print("Issue viewing new samples")
 
+        ##############################################################
+        #### SAVING
+        ##############################################################
         if rank==0 and epoch%val_mod==0:
             if hyps.get( "save", True ):
                 save_dict = {
@@ -578,31 +591,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     if hyps.get("star",False):
         collector.terminate_procs()
         collector.dispatch_runners()
-
-#def check_correct(tokenizer, output_ids, pred_ids):
-#    """
-#    Determines whether or not the outputs are correct for each row
-#    of the inputs.
-#
-#    Arguments:
-#        tokenizer: Tokenizer
-#        output_ids: torch LongTensor (N,S)
-#        pred_ids: torch LongTensor (N,T)
-#    Returns:
-#        corrects: Bool Tensor (N,)
-#            True values indicate that the final output of the row was
-#            correctly predicted.
-#    """
-#    targs = tokenizer.decode(output_ids)
-#    preds = tokenizer.decode(pred_ids)
-#    corrects = torch.zeros(len(preds))
-#    eos = tokenizer.eos
-#    sep = tokenizer.sep
-#    for i,(targ,pred) in enumerate(zip(targs, preds)):
-#        t = targ.split(eos)[0].split(sep)[-1]
-#        p = pred.split(eos)[0].split(sep)[-1]
-#        corrects[i] = t==p
-#    return corrects
 
 
 def print_examples(inpt_dict, tokenizer, n_samps=5):
@@ -731,5 +719,8 @@ def hyper_error_catching(hyps):
     if not hyps["blotch_p"] and not hyps.get("blotch_p_min", None) and\
             not hyps.get("blotch_p_max", None):
         hyps["model_type"] = "TransformerModel"
+    if "init_data" in hyps:
+        print("assuming init_data was meant to be init_samples")
+        hyps["init_samples"] = hyps["init_data"]
     return hyps
 
