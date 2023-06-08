@@ -133,6 +133,11 @@ class Model(torch.nn.Module):
         blotch_ids = (blotch_range*self.n_btokens).long()+self.n_tokens
         return blotch_ids
 
+    def sample_with_temperature(self, logits, temperature):
+        ps = torch.nn.functional.softmax( logits/temperature, dim=-1 )
+        return torch.multinomial(ps, num_samples=1)
+
+
 class TransformerModel(Model):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -195,8 +200,8 @@ class TransformerModel(Model):
                 the number of prediction steps if not using teacher
                 forcing
             temperature: float
-                not yet implemented, but this will be a sampling
-                parameter that adjusts the stochasticity of sampling.
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
             incl_all_inpts: bool
                 if true, will include all input tokens in the output
                 prediction tensor. otherwise only includes "predicted
@@ -238,7 +243,8 @@ class TransformerModel(Model):
                 pad_mask=pad_mask,
                 is_causal=is_causal,
                 n_steps=n_steps,
-                incl_all_inpts=incl_all_inpts
+                incl_all_inpts=incl_all_inpts,
+                temperature=temperature,
             )
         return ret_dict
 
@@ -282,7 +288,8 @@ class TransformerModel(Model):
                       is_causal:bool=None,
                       n_steps:int=10,
                       incl_all_inpts:bool=False,
-                      pad_pos_skip:bool=False):
+                      pad_pos_skip:bool=False,
+                      temperature=None):
         """
         Arguments:
             src: Tensor, shape ``[bsize, seq_len]``
@@ -306,6 +313,9 @@ class TransformerModel(Model):
                 if true, will skip over masked tokens when applying
                 positional encodings based on the pad mask. True values
                 in the mask will be skipped.
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
         Returns:
             output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
         """
@@ -350,7 +360,12 @@ class TransformerModel(Model):
             pred = self.decoder(output[:,-1])
             preds[:,S-1+step+incl_all_inpts] = pred
             if step < n_steps:
-                argmaxs = torch.argmax(pred, dim=-1)
+                if temperature:
+                    argmaxs = self.sample_with_temperature(
+                        pred, temperature
+                    )
+                else:
+                    argmaxs = torch.argmax(pred, dim=-1)
                 embs[:,S+step] = self.embeddings(argmaxs)
         return {"preds": preds}
 
@@ -396,8 +411,8 @@ class BlotchTokenModel(TransformerModel):
                 the number of prediction steps if not using teacher
                 forcing
             temperature: float
-                not yet implemented, but this will be a sampling
-                parameter that adjusts the stochasticity of sampling.
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
             incl_all_inpts: bool
                 if true, will include all input tokens in the output
                 prediction tensor. otherwise only includes "predicted
@@ -464,7 +479,8 @@ class BlotchTokenModel(TransformerModel):
                 pad_mask=pad_mask,
                 is_causal=is_causal,
                 n_steps=n_steps,
-                incl_all_inpts=False
+                incl_all_inpts=False,
+                temperature=temperature,
             )
             # Don't need to remove blotch token because freedom_fwd
             # always does it for us.
@@ -656,7 +672,7 @@ class LossWrapper(torch.nn.Module):
                                              no_grad=False,
                                              prob_len=None,
                                              incl_intl_prob=False,
-                                             temperature=1.,
+                                             temperature=None,
                                              incl_all_inpts=False,
                                              top_k=5,
                                              blotch_p=None,

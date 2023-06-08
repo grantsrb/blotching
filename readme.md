@@ -63,6 +63,15 @@ then running the following command:
         a value of 3 means there will be 3 training updates for every
         validation
 
+    "axe_loops": int
+        the number of loops to perform in which the samples are axed,
+        meaning they permanently lose a segment if the model got the
+        problem correct and the relative loss difference is less than
+        some tolerance
+    "axe_tol": float
+        the tolerence of the loss difference to decide when to keep
+        axings
+
     "aug_loops": int
         if greater than 0, will use the model to augment samples in the
         training data. Augmentations are only kept when the final answer
