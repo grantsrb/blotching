@@ -60,6 +60,7 @@ if __name__=="__main__":
     # Integer argument if you want to randomly sample n problems rather
     # than systematically looking at all possible problems.
     rand_samps = 3000
+    use_val_file = False # uses validation data from training
 
     if testing: print("CURRENTLY IN TESTING MODE!!!!")
 
@@ -127,7 +128,7 @@ if __name__=="__main__":
         # Make dataset
         if verbose and rank==0: print("Collecting Data")
         val_probs_file = os.path.join(model_folder, "val_probs.txt")
-        if os.path.exists(val_probs_file):
+        if use_val_file and os.path.exists(val_probs_file):
             with open(val_probs_file, "r") as f:
                 probs = [p.strip() for p in f.readlines()]
             data_cache = datas.make_data_cache(
