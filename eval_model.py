@@ -230,7 +230,7 @@ if __name__=="__main__":
                             reversed(range(1, len(stats["resp"])+1))
                     ])
                     print(
-                        "{TokAcc: {} - Correct: {} - {}% - {}s".format(
+                        "TokAcc: {} - Correct: {} - {}% - {}s".format(
                             df_dict["tok_acc"][-1].mean(),
                             correct,
                             int((i+1)/n_loops*100),
