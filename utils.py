@@ -1,5 +1,10 @@
 import torch
 
+DEVICES = {
+    **{-1: "cpu"},
+    **{i:i for i in range(10)}
+}
+
 def check_correct(tokenizer, output_ids, pred_ids, has_conf=False):
     """
     Determines whether or not the outputs are correct for each row
@@ -46,7 +51,7 @@ def vectorized_check_correct(
 
     Arguments:
         tokenizer: Tokenizer
-        output_ids: torch LongTensor (N,S)
+        output_ids: torch LongTensor (M,S)
         pred_ids: torch LongTensor (N,T)
         has_conf: bool
             if true, will assume a conf prediction follows the sep
@@ -59,11 +64,16 @@ def vectorized_check_correct(
     eos = tokenizer.eos_idx
     sep = tokenizer.sep_idx
     pad = tokenizer.pad_idx
-    device = pred_ids.get_device()
+    device = DEVICES[pred_ids.get_device()]
 
+    pred_ids = pred_ids.clone()
     pred_ids[:,-1] = eos
-    seps = output_ids==sep
-    aranges = torch.arange(pred_ids.shape[1])[None].repeat(
+    pseps = pred_ids==sep
+    oseps = output_ids==sep
+    oaranges = torch.arange(output_ids.shape[1])[None].repeat(
+        (len(output_ids), 1)
+    ).to(device)
+    paranges = torch.arange(pred_ids.shape[1])[None].repeat(
         (len(pred_ids), 1)
     ).to(device)
     # We find the eos in both predictions and solutions
@@ -74,18 +84,19 @@ def vectorized_check_correct(
     pred_ends = torch.argmax( (pred_ids==eos).long(), dim=-1 )
     soln_ends = torch.argmax( (output_ids==eos).long(),dim=-1 )
 
-    seps = (seps|((aranges<soln_ends[:,None])&(output_ids==pad))).long()
+    oseps = (oseps|((oaranges<soln_ends[:,None])&(output_ids==pad))).long()
 
     last_sep_idxs = torch.argsort(
-        seps.long(), dim=-1, descending=True
-    )[torch.arange(len(seps)).long(), seps.sum(-1).long()-1]+int(has_conf)
+        oseps.long(), dim=-1, descending=True
+    )[torch.arange(len(oseps)).long(), oseps.sum(-1).long()-1]+int(has_conf)
     soln_ends = soln_ends[:,None]
     soln_lens = soln_ends - last_sep_idxs[:,None]
-    soln_idxs = (aranges<soln_ends)&(aranges>=(soln_ends-soln_lens))
-    pred_ends = pred_ends[:,None]
-    ans_idxs = (aranges<pred_ends)&(aranges>=(pred_ends-soln_lens))
+    soln_idxs = (oaranges<soln_ends)&(oaranges>=(soln_ends-soln_lens))
 
-    corrects = torch.zeros_like(output_ids).float()
+    pred_ends = pred_ends[:,None]
+    ans_idxs = (paranges<pred_ends)&(paranges>=(pred_ends-soln_lens))
+
+    corrects = torch.zeros_like(pred_ids).float()
     try:
         idx = pred_ids[ans_idxs]==output_ids[soln_idxs]
     except:
@@ -101,7 +112,7 @@ def vectorized_check_correct(
         corrects = check_correct(tokenizer,output_ids,pred_ids,has_conf)
         assert False
         return corrects.to(device)
-    corrects[soln_idxs] = (idx).float()
+    corrects[ans_idxs] = (idx).float()
     corrects = corrects.sum(-1)
     corrects = corrects.squeeze()==soln_lens.squeeze()
     return corrects
@@ -204,8 +215,3 @@ def get_blotch_mask(
                     is_contig = True
             else: is_contig = False
     return mask
-
-if __name__=="__main__":
-    pred = torch.LongTensor( [0,1,2,3,4,5,6,7] )
-    targ = torch.LongTensor( [2,1,0,3,4,5,6,7] )
-
