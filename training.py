@@ -38,18 +38,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
 
     # Establish math environment parameters
     math_env = MathEnv(**hyps)
-    if hyps["p_mult"]>0:
-        max_num = math_env.max_num
-        max_ents = math_env.max_ents
-        mmn = math_env.max_mult_num
-        space = math_env.space_mults
-        hyps["max_val"] = max(
-          mmn**(max_ents-space*(max_ents//3))+space*(max_ents//3)*max_num,
-          max_num*max_ents
-        )
-        print("Max Value:", hyps["max_val"])
-    else:
-        hyps["max_val"] = math_env.max_ents*math_env.max_num
+    hyps["max_val"] = math_env.get_max_val()
+    print("Max Value:", hyps["max_val"])
 
     # Make Tokenizer
     max_num = hyps.get("max_num", 20)**hyps.get("max_ents", 2)
@@ -74,7 +64,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     if len(all_problems)<hyps["max_samples"]:
         if verbose and rank==0:
             print("Using all possible data")
-        val_len = int(0.2*len(all_problems))
+        val_len = min(int(0.2*len(all_problems)), hyps["val_samples"])
         val_cache, val_probs, val_solns = datas.make_data_cache(
             probs=all_problems[:val_len],
             tokenizer=tokenizer,
@@ -84,23 +74,26 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             batch_size=vbsize,
             ret_strings=True,
         )
-        train_probs = all_problems[val_len:]
+        hyps["seq_len"] = val_cache.seq_len
+        hyps["prob_len"] = val_cache.prob_len
+        init_samps = hyps.get("init_samples", hyps["max_samples"])
+        end = len(all_problems)
+        if init_samps: end = min(val_len+init_samps, len(all_problems))
+        train_probs = all_problems[val_len:end]
         data_cache = datas.make_data_cache(
             probs=train_probs,
             tokenizer=tokenizer,
             solns=None,
-            plen=math_env.prob_len,
-            slen=math_env.max_soln_len+2,
+            plen=hyps["prob_len"],
+            slen=hyps["seq_len"],
             batch_size=hyps["batch_size"]
         )
-        hyps["seq_len"] = val_cache.seq_len
-        hyps["prob_len"] = val_cache.prob_len
     else:
         if verbose and rank==0:
             print("Using sampling process")
         val_samples = hyps.get("val_samples",int(0.2*hyps["max_samples"]))
         if hyps["exp_name"] == "test":
-            val_samples = 1100
+            val_samples = min(vbsize, val_samples)
         val_cache, val_probs, _ = datas.get_data_cache(
             math_env=math_env,
             tokenizer=tokenizer,
@@ -117,7 +110,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         hyps["init_samples"] = hyps.get(
             "init_samples", hyps.get("max_samples",100000)
         )
-        if not hyps["init_samples"]:hyps["init_samples"]=hyps["max_samples"]
+        if not hyps["init_samples"]:
+            hyps["init_samples"]=hyps["max_samples"]
         data_cache, train_probs, _ = datas.get_data_cache(
             math_env=math_env,
             tokenizer=tokenizer,
@@ -128,6 +122,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             held_out_probs=val_probs,
             ret_strings=True,
         )
+    all_problems = set(val_probs).union(set(train_probs))
     if verbose and rank==0:
         print("Train Samples:", len(data_cache))
         print("Val Samples:", len(val_cache))
@@ -137,10 +132,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     hyps["model_parallel"] = hyps.get("model_parallel", False)
     if not hyps["model_parallel"]: model.to(rank)
 
-    if hyps.get("star", False):
-        collector = datas.Collector(model, hyps, tokenizer)
-
     if verbose and rank==0:
+        print("Model Type:", type(model))
         print("Recording Session")
     if rank==0:
         ml_utils.training.record_session(hyps, model)
@@ -187,10 +180,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     #############################################################
     if rank==0 and verbose: print("Beginning Training")
     for epoch in range(n_epochs):
-        # If enough training, asynchronously sample new data using model
-        if hyps.get("star",False) and epoch>=hyps.get("pre_epochs", 3):
-            if rank==0 and verbose: print("Dispatching Runners")
-            collector.dispatch_runners()
 
         epochtime = time.time()
         torch.cuda.empty_cache()
@@ -355,7 +344,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                             seq_len=hyps["seq_len"],
                             prob_len=val_cache.prob_len,
                             incl_intl_prob=hyps.get("incl_intl_prob", False),
-                            blotch_p=bp
+                            blotch_p=bp,
+                            temperature=hyps.get("temperature", None)
                         )
                         loss = package["loss"]
                         acc = package["acc"]
@@ -465,12 +455,17 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         #### STaR BOOTSTRAPPING
         ##############################################################
         n_new_samps = 0
-        if hyps.get("star",False) and epoch>=hyps.get("pre_epochs", 3):
-            if rank==0 and verbose:
-                print("Awaiting Runners")
-            # await_harvest does nothing until collectors are dispatched
-            collector.await_runners()
-            new_data = collector.harvest_exp()
+        if hyps.get("star_loops",0)>0 and epoch>=hyps.get("pre_epochs",3):
+            if rank==0 and verbose: print("Bootstrapping Dataset")
+            new_data = datas.bootstrap_data(
+                hyps=hyps,
+                model=model,
+                tokenizer=tokenizer,
+                env=math_env,
+                held_out_probs=all_problems,
+                verbose=rank==0 and verbose
+            )
+            new_data = torch.vstack(new_data)
             n_new_samps = len(new_data)
             if rank==0 and verbose:
                 try:
@@ -486,8 +481,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             data_cache.add_data(new_data)
             if rank==0 and verbose:
                 print("Updating Runner Models")
-            # updates the collection model with the most recent weights
-            collector.update_model(model)
 
         ##############################################################
         #### DATA AUGMENTATIONS
@@ -521,7 +514,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         n_axed = 0
         if hyps.get("axe_loops",0)>0 and epoch>=hyps.get("pre_epochs",3):
             print("Axing Data Samples")
-            axed_samps = datas.reduce_data(
+
+            axed_samps = datas.axe_data(
                 hyps=hyps,
                 wrapped_model=wrapped_model,
                 data_cache=data_cache,
@@ -529,6 +523,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 in_place=True,
                 verbose=rank==0 and verbose
             )
+
             n_axed = sum([len(x) for x in axed_samps])
             if rank==0 and verbose:
                 try:
@@ -584,13 +579,13 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 )
                 save_training_log(hyps, logstr)
             scheduler.step(val_loss)
+
+        if rank==0 and verbose:
+            print("Total Training Samples:", len(data_cache))
         keys = list(package.keys())
         for k in keys: del package[k]
-        if hyps["exp_name"]=="test" and epoch==2: break
+        if hyps["exp_name"]=="test" and epoch>2: break
     if hyps["multi_gpu"]: dist.destroy_process_group()
-    if hyps.get("star",False):
-        collector.terminate_procs()
-        collector.dispatch_runners()
 
 
 def print_examples(inpt_dict, tokenizer, n_samps=5):
@@ -722,5 +717,7 @@ def hyper_error_catching(hyps):
     if "init_data" in hyps:
         print("assuming init_data was meant to be init_samples")
         hyps["init_samples"] = hyps["init_data"]
+    if hyps["init_samples"] < hyps["batch_size"]:
+        hyps["batch_size"] = hyps["init_samples"]
     return hyps
 
