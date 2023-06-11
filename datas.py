@@ -175,7 +175,7 @@ class DataCache(torch.utils.data.Dataset):
 
     def slice(self, idx, endx):
         """
-        Returns a single data sample
+        Returns a data slice
 
         Args:
             idx: int
@@ -705,7 +705,7 @@ class Runner:
                     is_causal=True,
                     tforce=False,
                     n_steps=self.shared_exp.shape[1]-inpts.shape[1]-1,
-                    temperature=self.hyps.get("temperature", 1),
+                    temperature=self.hyps.get("temperature", None),
                     incl_all_inpts=True,
                     blotch_p=self.hyps.get("bootstrap_blotch_p", 0)
                 )
@@ -732,7 +732,111 @@ class Runner:
                             preds[i,idx:] = self.tokenizer.pad_idx
                 self.shared_exp[startx:endx,:] = preds
 
-def reduce_data(
+def bootstrap_data(
+        hyps,
+        model,
+        tokenizer,
+        env=None,
+        held_out_probs=set(),
+        verbose=True
+    ):
+    """
+    Uses the model to generate new data from randomly sampled problems.
+
+    Args:
+        hyps: dict
+            val_batch_size: int
+                the batch size for the augmentation loop
+            aug_loops: int
+                the number of augmentation loops to perform
+        model: torch Module
+        tokenizer: Tokenizer
+        env: MathEnv or None
+            if None, one is constructed using the argued hyps
+        held_out_probs: set of str
+            any problems that should be held out of the sampling
+    Returns:
+        new_data: list of torch tensor [(A,S), (A1,S), ...]
+            a list of variable length tensors that are the augmented
+            samples.
+    """
+    bsize = hyps.get("val_batch_size", hyps["batch_size"])
+    n_samps = bsize*hyps.get("star_loops", 1)
+    if env is None: env = envs.MathEnv(**hyps)
+    plen = hyps["prob_len"]
+    probs = []
+    new_samps = []
+    eos = tokenizer.eos_idx
+    pad = tokenizer.pad_idx
+    sep = tokenizer.sep_idx
+    model.eval()
+    device = model.get_device()
+
+    # First generate new problems and solutions
+    # Add 2 for sep and eos tokens
+    max_slen = len(str(env.get_max_val()))+2
+    fin_solns = torch.zeros(n_samps, max_slen)+pad
+    fin_solns[:,0] = sep
+    soln_lens = torch.zeros(n_samps)
+    solns = []
+    for i in range(n_samps):
+        prob = env.sample(held_out_probs=held_out_probs)
+        probs.append(prob)
+
+        ans = torch.LongTensor([
+            tokenizer.str2idx[x] for x in str(envs.eval_prob(prob))
+        ])
+        fin_solns[i,1:1+len(ans)] = ans
+        fin_solns[i,1+len(ans)] = eos
+
+        soln = envs.MathEnv.find_soln(prob)
+        solns.append(soln)
+        soln_lens[i] = len(tokenizer.sep+soln)
+    inpts = tokenizer(
+        probs,
+        as_tensor=True,
+        max_len=plen+1, # Add a space for the first sep token
+        pad=True,
+        add_eos=False
+    )
+    inpts[:,-1] = tokenizer.sep_idx
+
+    pad_mask = inpts==tokenizer.pad_idx
+    aranges = torch.arange(hyps["seq_len"]).long()
+    aranges = aranges[None].repeat((bsize,1)).to(device)
+    with torch.no_grad():
+        for i in range(0,len(inpts),bsize):
+            startx = i
+            endx = i+bsize
+            ret_dict = model(
+                inpts[startx:endx].to(device),
+                pad_mask=pad_mask[startx:endx].to(device),
+                is_causal=True,
+                tforce=False,
+                n_steps=hyps["seq_len"]-inpts.shape[1]-1,
+                temperature=hyps.get("temperature", None),
+                incl_all_inpts=True,
+                blotch_p=hyps.get("bootstrap_blotch_p", 0)
+            )
+            logits = ret_dict["preds"]
+            preds = torch.argmax(logits, dim=-1)
+            preds[:,-1] = tokenizer.eos_idx
+
+            ends = torch.argmax(
+              (preds[:,plen:]==tokenizer.eos_idx).long(),
+              dim=-1
+            )
+            is_short = ends<soln_lens[startx:endx].to(device)
+            is_correct = utils.vectorized_check_correct(
+                tokenizer, fin_solns[startx:endx].to(device), preds
+            )
+            preds[aranges>(plen+ends[:,None])] = pad
+            samps =   preds[is_short&is_correct]
+            new_samps.append(samps)
+    return new_samps
+
+
+def axe_data(
         hyps,
         wrapped_model,
         data_cache,
@@ -764,9 +868,10 @@ def reduce_data(
             samples.
     """
     wrapped_model.eval()
-    tol = hyps.get("axe_tol")
+    abs_tol = hyps.get("abs_axe_tol", math.inf)
+    rel_tol = hyps.get("rel_axe_tol", math.inf)
     bsize = hyps.get("val_batch_size", 500)
-    n_loops = hyps.get("ablate_loops", 3)
+    n_loops = hyps.get("axe_loops", 3)
     plen = data_cache.prob_len
     device = wrapped_model.model.get_device()
     pad = tokenizer.pad_idx
@@ -776,18 +881,23 @@ def reduce_data(
 
     aug_data = []
     # Aranges will help with indexing for padding and other things
-    aranges = torch.arange(data_cache.shape[1])[None].repeat(
+    og_aranges = torch.arange(data_cache.shape[1])[None].repeat(
         (bsize, 1)
     ).to(device)
+    og_barange = torch.arange(bsize)
     with torch.no_grad():
         perm = torch.randperm(len(data_cache)).long()
-        rng = range(min(n_loops, len(data_cache)//bsize))
+        m = min(n_loops, len(data_cache)//bsize)
+        if m==0: m = 1
+        rng = range(m)
         if verbose: rng = tqdm(rng)
         for i in rng:
             startx = i*bsize
             endx = startx+bsize
             permxs = perm[startx:endx] # Used later in the in_place op
             ids = data_cache.cache[permxs]
+            aranges = og_aranges[:len(ids)]
+            barange = og_barange[:len(ids)]
             outputs = ids[:,1:].to(device)
             inpts = ids[:,:-1].to(device)
             inpt_pad_mask = ((inpts==pad)|(inpts==eos)).to(device)
@@ -807,12 +917,10 @@ def reduce_data(
                 no_grad=True,
                 prob_len=plen,
                 ret_preds=True,
+                temperature=hyps.get("temperature", None),
             )
             pred_ids = ret_dict["preds"]
             was_correct = utils.vectorized_check_correct(
-                tokenizer, data["output_ids"], pred_ids
-            )
-            is_correct = utils.check_correct(
                 tokenizer, data["output_ids"], pred_ids
             )
 
@@ -820,7 +928,9 @@ def reduce_data(
             # least a single separator
             sep_sums = torch.sum(inpts==sep, dim=-1)-1
             max_seps = torch.max(sep_sums)
+            if max_seps==0: continue
             losses = []
+            blosses = []
             masks = []
             for j in range(-1, max_seps):
                 if j>-1:
@@ -843,28 +953,53 @@ def reduce_data(
                     ret_preds=True,
                 )
                 loss = ret_dict["loss"].to(device)
+
                 if j==-1:
                     base_loss = loss
                 else:
-                    loss[~(was_correct&did_blotch)] = math.inf
-                    losses.append(((loss-base_loss)/base_loss).cpu())
+                    # only want to look at loss following the axing
+                    omask = ~data["out_pad_mask"]
+                    # Find index of current axing
+                    ax = torch.argmax(blotch_mask.long(),dim=-1)
+                    ax = (aranges<ax[:,None])[:,1:]
+                    # Set all losses before ax to 0
+                    loss[ax] = 0
+                    omask[ax] = 0
+                    base_loss[ax] = 0
+
+                    div = omask.float().sum(-1)
+                    bloss = base_loss.sum(-1)/div
+
+                    loss = loss.sum(-1)/div
+                    pred_ids = ret_dict["preds"]
+                    pred_ids[:5] = data["output_ids"][:5]
+                    is_correct = utils.vectorized_check_correct(
+                        tokenizer, data["output_ids"], pred_ids
+                    )
+                    loss[~(was_correct&did_blotch&is_correct)] = math.inf
+                    losses.append(loss)
+                    blosses.append(bloss)
 
             losses = torch.stack(losses, dim=-1)
-            best_losses, best_steps = torch.min(losses, dim=-1)
-            idxs = (best_losses<tol)
+            blosses = torch.stack(blosses,dim=-1)
+            abs_diffs = losses-blosses
+            best_diffs, best_steps = torch.min(abs_diffs,dim=-1)
+            div = blosses[barange,best_steps]
+            best_rels = best_diffs/div
+            idxs = ((best_diffs<abs_tol)&(best_rels<rel_tol)).cpu()
+            if hyps["exp_name"]=="test": idxs[:10] = True
             if torch.any(idxs):
                 new_data = ids[idxs]
                 axe_idxs = utils.get_blotch_mask(
                     new_data,
                     sep_idx=sep,
-                    step_idx=best_steps[idxs],
+                    step_idx=best_steps[idxs].cpu(),
                 )
                 new_data[axe_idxs] = tokenizer.pad_idx
                 # Add data to list, and cache if in_place
                 if len(new_data) > 0:
-                    aug_data.append(new_data)
+                    aug_data.append(new_data.cpu())
                     if in_place:
-                        idxs = idxs.cpu()
                         data_cache.cache[permxs[idxs], :] = new_data.cpu()
     return aug_data
 
@@ -945,8 +1080,8 @@ def augment_data(
                 tforce=False,
                 # -2 for the plen+1 in inpts and inclusion of all inpts
                 n_steps=data_cache.shape[1]-plen-2,
-                temperature=hyps.get("temperature", 1),
                 incl_all_inpts=True,
+                temperature=hyps.get("temperature", None),
                 blotch_p=hyps.get("bootstrap_blotch_p", 0)
             )
             logits = ret_dict["preds"]
@@ -954,12 +1089,17 @@ def augment_data(
             if hyps["exp_name"] == "test": 
                 preds[:,1:] = outputs.clone()
 
-            preds[:,-1] = eos
-
+            # Index of last relevant token. Guaranteed to be last index
+            # or shorter because of preds[:,-1] = eos
             pred_ends = torch.argmax( (preds==eos).long(), dim=-1 )
-            soln_ends = torch.argmax( (outputs==eos).long(),dim=-1 )
-            soln_ends[soln_ends==0] = outputs.shape[-1]+1
-            shorts = ((soln_ends+1-pred_ends)>0)&(pred_ends>0)
+            preds[pred_ends==0,-1] = eos
+            pred_ends[pred_ends==0] = preds.shape[1]
+            # Index of last relevant token
+            soln_ends = torch.argmax( (outputs==eos).long(), dim=-1 )
+            # Set anything that doesn't have an eos token to the last
+            # index
+            soln_ends[soln_ends==0] = outputs.shape[-1]-1
+            shorts = ((soln_ends-pred_ends)>0)&(pred_ends>0)
 
             if hyps["exp_name"] == "test": 
                 shorts[:5] = True
@@ -970,7 +1110,7 @@ def augment_data(
             preds[pad_idxs] = pad
 
             corrects = utils.vectorized_check_correct(
-                tokenizer, outputs, pred_ids=preds
+                tokenizer, outputs, pred_ids=preds[:,1:]
             )
             ## Find last separator and eos to determine window of answer.
             ## Then use sum of matching tokens to determine if correct.
@@ -1267,7 +1407,7 @@ def make_data_cache(probs,
                    solns=None,
                    plen=None,
                    slen=None,
-                   seq_len=100,
+                   seq_len=None,
                    batch_size=128,
                    max_samples=None,
                    ret_strings=False,
@@ -1283,6 +1423,10 @@ def make_data_cache(probs,
             object
         solns: list of str or None
             solns will be generated if None is argued
+        plen: int
+            the length of the longest problem
+        slen: int
+            the length of the longest solution
         seq_len: int
             the desired sequence lengths of the samples
         batch_size: int
