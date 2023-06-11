@@ -134,6 +134,7 @@ class Model(torch.nn.Module):
         return blotch_ids
 
     def sample_with_temperature(self, logits, temperature):
+        if not temperature: return torch.argmax(logits, dim=-1)
         ps = torch.nn.functional.softmax( logits/temperature, dim=-1 )
         return torch.multinomial(ps, num_samples=1)
 
@@ -360,12 +361,9 @@ class TransformerModel(Model):
             pred = self.decoder(output[:,-1])
             preds[:,S-1+step+incl_all_inpts] = pred
             if step < n_steps:
-                if temperature:
-                    argmaxs = self.sample_with_temperature(
-                        pred, temperature
-                    )
-                else:
-                    argmaxs = torch.argmax(pred, dim=-1)
+                argmaxs = self.sample_with_temperature(
+                    pred, temperature
+                ).squeeze()
                 embs[:,S+step] = self.embeddings(argmaxs)
         return {"preds": preds}
 
@@ -553,8 +551,8 @@ class PositionalEncoding(nn.Module):
         sums = (~mask).float().sum(-1)
         idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
         fx = torch.zeros_like(x)
-        fx = x + fx
         fx[~mask] += pe[idxs]
+        fx = x + fx
 
         return self.dropout( fx )
 
@@ -585,8 +583,8 @@ class PositionalEncoding(nn.Module):
         sums = torch.sum((~mask).float(), -1)
         idxs = torch.cat([torch.arange(s) for s in sums], axis=0).long()
         fx = torch.zeros_like(x)
-        fx = x + fx
         fx[~mask] += pe[idxs]
+        fx = x + fx
 
         return self.dropout( fx )
 
@@ -721,8 +719,8 @@ class LossWrapper(torch.nn.Module):
             blotch_p: float or float tensor (B,)
             reduce_metrics: bool
                 if true, loss and acc will be averaged over all samples.
-                if false, loss and acc will be returned as vectors with
-                lengths batch_size
+                if false, loss and acc will be returned as tensors for
+                each token prediction
         Returns:
             ret_dict: dict (keys: str, vals: torch tensor)
                 "loss": torch tensor (1,) or (B,)
@@ -863,7 +861,7 @@ class LossWrapper(torch.nn.Module):
         elif not reduce_metrics:
             temp = torch.zeros_like(out_ids).float()
             temp[out_mask.reshape(out_ids.shape)] = loss
-            loss = temp.sum(-1)/out_mask.sum(-1)
+            loss = temp
         ret_dict["loss"] = loss
 
         argmax = torch.argmax(ps, dim=-1)
