@@ -68,6 +68,10 @@ then running the following command:
         meaning they permanently lose a segment if the model got the
         problem correct and the relative loss difference is less than
         some tolerance
+    "abs_axe_tol": bool
+        if true, will use absolute value of loss difference when axing
+        samples. Otherwise will use the `axe_tol` as a tolerance for
+        proportional change
     "axe_tol": float
         the tolerence of the loss difference to decide when to keep
         axings
@@ -85,16 +89,16 @@ then running the following command:
         if false, the augmentations will be added to the existing
         dataset.
 
-    "star": bool
-        if true, will use model to sample new data that is selected
-        for correctness and brevity
+    "star_loops": int
+        if greater than 0, will use the model to collect new samples for
+        the training data. STaR samples are only kept when the final
+        answer is correct and the total answer is shorter than the
+        original. The value of `star_loops` indicates the number of
+        bootstrap loops to perform after each epoch. Each loop attempts
+        to collect `val_batch_size` newly sampled problems
+
     "pre_epochs": int
         the number of epochs to wait before sampling new data
-    "n_runner_procs": int
-        the number of parallel processes to use for collecting new
-        data using the model
-    "collection_size": int
-        the number of new samples to attempt when collecting new data.
 
     "max_val_loops": int
         enforces a limit on the number of validation iterations. This
