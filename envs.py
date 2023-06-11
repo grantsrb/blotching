@@ -154,6 +154,26 @@ class MathEnv:
         )
         self.max_soln_len = len(self.max_soln)
 
+    def get_max_val(self):
+        """
+        Returns the maximum possible value that can occur from the
+        given parameters.
+
+        Returns:
+            m: int
+                the max final answer value
+        """
+        max_num = self.max_num
+        max_ents = self.max_ents
+        mmn = self.max_mult_num
+        space = self.space_mults
+        if self.p_mult==0: return max_num*max_ents
+        if space:
+            m = (max_ents//2)*mmn**(2) + (max_ents%2)*max_num
+        else:
+            m = mmn**max_ents
+        return max(m,max_num*max_ents)
+
     def get_max_prob(self):
         """
         Creates the maximum possible length problem given the member
@@ -208,11 +228,17 @@ class MathEnv:
                 prob = mult_prob
         return prob,soln
 
-    def sample(self):
+    def sample(self, held_out_probs=set()):
         """
         Samples a problem using the parameters specific to self
+
+        Args:
+            held_out_probs: set of str
+                The problems in this set will not be sampled
+        Returns:
+            prob: str
         """
-        return MathEnv.sample_prob(
+        prob = MathEnv.sample_prob(
             max_num=self.max_num,
             max_ents=self.max_ents,
             p_mult=self.p_mult,
@@ -222,6 +248,21 @@ class MathEnv:
             p_ent=self.p_ent,
             max_mult_num=self.max_mult_num,
         )
+
+        loop_count = 0
+        while prob in held_out_probs and loop_count<100:
+            prob = MathEnv.sample_prob(
+                max_num=self.max_num,
+                max_ents=self.max_ents,
+                p_mult=self.p_mult,
+                space_mults=self.space_mults,
+                p_paren=self.p_paren,
+                zipf_order=self.zipf_order,
+                p_ent=self.p_ent,
+                max_mult_num=self.max_mult_num,
+            )
+            loop_count+=1
+        return prob
 
     @staticmethod
     def sample_prob(max_num, max_ents=2, p_mult=0, space_mults=True,
