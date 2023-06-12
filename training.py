@@ -463,24 +463,31 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 tokenizer=tokenizer,
                 env=math_env,
                 held_out_probs=all_problems,
-                verbose=rank==0 and verbose
+                verbose=rank==0 and verbose,
             )
             new_data = torch.vstack(new_data)
+            data_cache.add_data(new_data)
             n_new_samps = len(new_data)
             if rank==0 and verbose:
                 try:
                     print("New samples:", n_new_samps)
                     if n_new_samps>0:
-                        print("Examples:")
-                        examps = tokenizer.decode(new_data[:5])
-                        for e,ex in enumerate(examps):
-                            print(e,"-",ex.replace(tokenizer.pad, ""))
+                        sf = hyps['save_folder']
+                        fname = os.path.join(sf,"star_samps.txt")
+                        with open(fname,"a") as f:
+                            f.write("\n\nEpoch: {}\n".format(epoch))
+                            print("Examples:")
+                            examps = tokenizer.decode(new_data)
+                            for e,ex in enumerate(examps):
+                                s = "{} - {}".format(
+                                    e,ex.replace(tokenizer.pad, "")
+                                )
+                                if e < 5:
+                                    print(s)
+                                f.write(s + "\n")
                 except Exception as e:
                     print(e)
                     print("Issue viewing new samples")
-            data_cache.add_data(new_data)
-            if rank==0 and verbose:
-                print("Updating Runner Models")
 
         ##############################################################
         #### DATA AUGMENTATIONS
@@ -493,17 +500,29 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 model=model,
                 data_cache=data_cache,
                 tokenizer=tokenizer,
-                in_place=True
+                in_place=hyps["in_place"]
             )
+            if not hyps["in_place"]:
+                new_data = torch.vstack(aug_samps)
+                data_cache.add_data(new_data)
             n_aug_samps = sum([len(x) for x in aug_samps])
             if rank==0 and verbose:
                 try:
                     print("Augmented samples:", n_aug_samps)
                     if n_aug_samps>0:
-                        print("Examples:")
-                        examps = tokenizer.decode(aug_samps[0][:5])
-                        for e,ex in enumerate(examps):
-                            print(e,"-",ex.replace(tokenizer.pad, ""))
+                        sf = hyps['save_folder']
+                        fname = os.path.join(sf,"aug_samps.txt")
+                        with open(fname,"a") as f:
+                            f.write("\n\nEpoch: {}\n".format(epoch))
+                            print("Examples:")
+                            examps = tokenizer.decode(aug_samps[0])
+                            for e,ex in enumerate(examps):
+                                s = "{} - {}".format(
+                                    e,ex.replace(tokenizer.pad, "")
+                                )
+                                if e < 5:
+                                    print(s)
+                                f.write(s + "\n")
                 except Exception as e:
                     print(e)
                     print("Issue viewing new samples")
@@ -514,31 +533,34 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         n_axed = 0
         if hyps.get("axe_loops",0)>0 and epoch>=hyps.get("pre_epochs",3):
             print("Axing Data Samples")
-
             axed_samps = datas.axe_data(
                 hyps=hyps,
                 wrapped_model=wrapped_model,
                 data_cache=data_cache,
                 tokenizer=tokenizer,
-                in_place=True,
+                in_place=hyps["in_place"],
                 verbose=rank==0 and verbose
             )
-
+            if not hyps["in_place"]:
+                new_data = torch.vstack(axed_samps)
+                data_cache.add_data(new_data)
             n_axed = sum([len(x) for x in axed_samps])
             if rank==0 and verbose:
                 try:
                     print("Axed samples:", n_axed)
                     if n_axed>0:
+                        sf = hyps['save_folder']
                         fname = os.path.join(sf,"axed_samps.txt")
                         with open(fname,"a") as f:
                             f.write("\n\nEpoch: {}\n".format(epoch))
                             print("Examples:")
-                            examps = tokenizer.decode(axed_samps[0][:5])
+                            examps = tokenizer.decode(axed_samps[0])
                             for e,ex in enumerate(examps):
                                 s = "{} - {}".format(
                                     e,ex.replace(tokenizer.pad, "")
                                 )
-                                print(s)
+                                if e < 5:
+                                    print(s)
                                 f.write(s + "\n")
                 except Exception as e:
                     print(e)
