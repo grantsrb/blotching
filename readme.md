@@ -84,10 +84,6 @@ then running the following command:
         loops to perform after each epoch. Each loop attempts to augment
         `val_batch_size` uniformly sampled data points from the existing
         data.
-    "in_place": bool
-        if true, the augmentations will replace the existing examples.
-        if false, the augmentations will be added to the existing
-        dataset.
 
     "star_loops": int
         if greater than 0, will use the model to collect new samples for
@@ -99,6 +95,13 @@ then running the following command:
 
     "pre_epochs": int
         the number of epochs to wait before sampling new data
+    "in_place": bool
+        if true, the augmentations will replace the existing examples.
+        if false, the augmentations will be added to the existing
+        dataset.
+    "aug_mod": int
+        a modulus to determine the frequency of data manipulations.
+        manipulations are augmentations, axings, or star bootstraps
 
     "max_val_loops": int
         enforces a limit on the number of validation iterations. This
