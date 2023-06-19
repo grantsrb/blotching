@@ -51,7 +51,7 @@ def get_stats(tokenizer, ids, remove_padding=True):
 
 
 if __name__=="__main__":
-    rank = 0
+    rank = 0 # Ignore this. Rank if using parallel processing
     verbose = True
     bsize = 1000 # Determines batch size of evaluation
     overwrite = False
@@ -59,7 +59,7 @@ if __name__=="__main__":
     max_num = None # override the max_num given by the hyps.
     # Integer argument if you want to randomly sample n problems rather
     # than systematically looking at all possible problems.
-    rand_samps = 3000
+    rand_samps = 5000
     use_val_file = False # uses validation data from training
 
     if testing: print("CURRENTLY IN TESTING MODE!!!!")

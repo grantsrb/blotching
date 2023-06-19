@@ -1,4 +1,6 @@
 import torch
+import collections
+import numpy as np
 
 DEVICES = {
     **{-1: "cpu"},
@@ -86,9 +88,7 @@ def vectorized_check_correct(
 
     oseps = (oseps|((oaranges<soln_ends[:,None])&(output_ids==pad))).long()
 
-    last_sep_idxs = torch.argsort(
-        oseps.long(), dim=-1, descending=True
-    )[torch.arange(len(oseps)).long(), oseps.sum(-1).long()-1]+int(has_conf)
+    last_sep_idxs = arglast(oseps.long(), dim=-1) + int(has_conf)
     soln_ends = soln_ends[:,None]
     soln_lens = soln_ends - last_sep_idxs[:,None]
     soln_idxs = (oaranges<soln_ends)&(oaranges>=(soln_ends-soln_lens))
@@ -116,6 +116,67 @@ def vectorized_check_correct(
     corrects = corrects.sum(-1)
     corrects = corrects.squeeze()==soln_lens.squeeze()
     return corrects
+
+def get_soln_mask(
+        ids,
+        eos_id,
+        sep_id,
+        pad_id,
+        has_conf=False
+    ):
+    """
+    Finds a boolean mask over the final answer, no sep or eos included
+
+    # We find the eos in solutions
+    # We then find the ground truth solution length
+    # We then create a mask that spreads the length of the soln starting
+    #   from the eos token
+
+    Arguments:
+        ids: torch LongTensor (N,T)
+        eos_id: int
+        sep_id: int
+        pad_id: int
+        has_conf: bool
+            if true, will assume a conf prediction follows the sep
+            token
+    Returns:
+        ans_mask: Bool Tensor (N,)
+            True values indicate the final output
+    """
+    device = DEVICES[ids.get_device()]
+
+    seps = ids==sep_id
+    aranges = torch.arange(ids.shape[1])[None].repeat(
+        (len(ids), 1)
+    ).to(device)
+
+    soln_ends = torch.argmax( (ids==eos_id).long(),dim=-1 )
+
+    # Need to look at padding because it's possible to have
+    # =PPPP45E as an answer. Padding is not to be worried about later
+    # because it's factored into the sum to find the last index
+    seps = (seps|((aranges<soln_ends[:,None])&(ids==pad_id))).long()
+
+    last_sep_idxs = arglast(seps.long(), dim=-1)+int(has_conf)
+    soln_ends = soln_ends[:,None]
+    soln_lens = soln_ends - last_sep_idxs[:,None]
+    soln_idxs = (aranges<soln_ends)&(aranges>=(soln_ends-soln_lens))
+    return soln_idxs
+
+def arglast(mask, dim=-1):
+    """
+    This function finds the index of the last max value along a given
+    dimension.
+
+    Args:
+        mask: bool (B,N)
+        dim: int
+    Returns:
+        the index of the last true value along the dimension
+    """
+    argmaxs = torch.argmax(torch.flip(mask, dims=(dim,)), dim=dim)
+    return mask.shape[dim] - argmaxs - 1
 
 def get_blotch_mask(
         idxs,
@@ -215,3 +276,46 @@ def get_blotch_mask(
                     is_contig = True
             else: is_contig = False
     return mask
+
+class PlateauDetector:
+    def __init__(self, maxlen=10, track_min=True):
+        """
+        This class detects when a metric has reached a plateau. Set
+        track_min to true for metrics that you want to minimize. Set
+        it to false for metrics you want to maximize.
+
+        Args:
+            maxlen: int
+                the maximum length history to track
+            track_min: bool
+                set this to true for values that you wish to minimize.
+                set this to false for values that you wish to maximize.
+        """
+        if not maxlen: maxlen = 1
+        self.maxlen = maxlen
+        self.track_min = track_min
+        self.reset()
+
+    def step(self, val):
+        self.last_val = self.history.popleft()
+        self.history.append(val)
+        return self.is_plateau()
+
+    def is_plateau(self):
+        if self.track_min: return self.last_val<np.min(self.history)
+        else: return self.last_val>np.max(self.history)
+
+    def reset(self):
+        self.history = collections.deque([],maxlen=self.maxlen)
+        self.last_val = np.inf if self.track_min else -np.inf
+        self.history.append(self.last_val)
+
+
+if __name__=="__main__":
+    bools = torch.LongTensor(
+        [1,0,0,1,0,1,1,0,0,0]
+    )
+    print(arglast(bools))
+    bools = torch.randint(0,2,(3,4))
+    print("BOOLS:", bools)
+    print("arglasts:", arglast(bools,dim=-1))

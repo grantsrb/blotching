@@ -6,6 +6,7 @@ import numpy as np
 import time
 from tqdm import tqdm
 import os
+import collections
 
 import ml_utils
 import utils
@@ -178,6 +179,9 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     #############################################################
     # Training
     #############################################################
+    plateau = utils.PlateauDetector(
+        maxlen=hyps.get("min_aug_gap",10), track_min=True
+    )
     if rank==0 and verbose: print("Beginning Training")
     for epoch in range(n_epochs):
 
@@ -277,6 +281,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     )
         div = (i+1)
         train_loss = round(avg_loss/div, 5)
+        plateau.step(train_loss)
         train_acc  = round(avg_acc/div, 5)
         train_len_diff = round(avg_len_diff/div,5)
         train_len_perc = round(avg_len_perc/div,5)
@@ -319,12 +324,13 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 nloops = hyps.get("max_val_loops",None)
                 if nloops is None: nloops = len(iterable)
                 nloops = min(nloops, len(iterable))
-                if hyps["model_type"]=="TransformerModel":
-                    blotch_ps = [0.0]
-                elif hyps["exp_name"]=="test": blotch_ps = [0]
-                else:
-                    blotch_ps = np.arange(max(model.n_btokens//2,1))*2
-                    blotch_ps = blotch_ps/model.bp_gran
+                blotch_ps = [0]
+                #if hyps["model_type"]=="TransformerModel":
+                #    blotch_ps = [0.0]
+                #elif hyps["exp_name"]=="test": blotch_ps = [0]
+                #else:
+                #    blotch_ps = np.arange(max(model.n_btokens//2,1))*2
+                #    blotch_ps = blotch_ps/model.bp_gran
                 for bp in blotch_ps:
                     print("\nBlotch P:", bp)
                     avg_loss = 0
@@ -346,7 +352,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                             prob_len=val_cache.prob_len,
                             incl_intl_prob=hyps.get("incl_intl_prob", False),
                             blotch_p=bp,
-                            temperature=hyps.get("temperature", None)
+                            temperature=hyps.get("val_temp", None)
                         )
                         loss = package["loss"]
                         acc = package["acc"]
@@ -452,11 +458,16 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             keys = list(data.keys())
             for k in keys: del data[k]
 
-        if (epoch % aug_mod) == 0 or epoch==n_epochs-1:
+        n_new_samps = 0
+        n_aug_samps = 0
+        n_axed = 0
+        is_test = hyps["exp_name"]=="test" and epoch>0
+        if is_test or (aug_mod<0 and plateau.is_plateau()) or\
+                                    (aug_mod>0 and (epoch%aug_mod)==0):
+            plateau.reset()
             ###########################################################
             #### STaR BOOTSTRAPPING
             ###########################################################
-            n_new_samps = 0
             star_loops = hyps.get("star_loops",0)
             if star_loops>0 and epoch>=hyps.get("pre_epochs",3):
                 if rank==0 and verbose: print("Bootstrapping Dataset")
@@ -495,9 +506,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             ###########################################################
             #### DATA AUGMENTATIONS
             ###########################################################
-            n_aug_samps = 0
             aug_loops = hyps.get("aug_loops",0)
-            if aug_loops>0 and epoch>=hyps.get("pre_epochs",3):
+            if aug_loops!=0 and epoch>=hyps.get("pre_epochs",3):
                 print("Augmenting Dataset")
                 aug_samps = datas.augment_data(
                     hyps=hyps,
@@ -534,9 +544,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             ###########################################################
             #### SELECTIVE AXING
             ###########################################################
-            n_axed = 0
             axe_loops = hyps.get("axe_loops",0)
-            if axe_loops>0 and epoch>=hyps.get("pre_epochs",3):
+            if axe_loops!=0 and epoch>=hyps.get("pre_epochs",3):
                 print("Axing Data Samples")
                 axed_samps = datas.axe_data(
                     hyps=hyps,
@@ -722,13 +731,17 @@ def make_model(hyps):
         hyps: dict
             dict of hyperparameters. See `README.md` for details
     """
-    if hyps.get("max_posencs", None) is None:
-        hyps["max_posencs"] = hyps["seq_len"]*3
-    model = models.__dict__[hyps["model_type"]](**hyps)
+    checkpt = None
     init_checkpt = hyps.get( "init_checkpt", None)
     if init_checkpt is not None and init_checkpt.strip()!="":
-        print("Initializing from checkpoint", init_checkpt)
         checkpt = ml_utils.save_io.load_checkpoint(init_checkpt)
+
+    if hyps.get("max_posencs", None) is None:
+        if checkpt: hyps["max_posencs"] = checkpt["hyps"]["max_posencs"]
+        else: hyps["max_posencs"] = hyps["seq_len"]*3
+    model = models.__dict__[hyps["model_type"]](**hyps)
+    if checkpt:
+        print("Initializing from checkpoint", init_checkpt)
         model.load_state_dict(checkpt["state_dict"])
     return model
 

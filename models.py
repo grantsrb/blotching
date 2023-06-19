@@ -7,6 +7,11 @@ from utils import get_blotch_mask
 import ml_utils
 import math
 
+from transformers import (
+    CONFIG_MAPPING,
+    AutoModelForCausalLM,
+)
+
 DEVICES = {
     -1: "cpu", **{i:i for i in range(10)}
 }
@@ -29,6 +34,7 @@ class Model(torch.nn.Module):
                        learn_posencs:bool=False,
                        pad_pos_skip:bool=False,
                        sep_idx:int=None,
+                       actv_fxn:str="gelu",
                        *args, **kwargs):
         """
         n_tokens: int
@@ -78,6 +84,8 @@ class Model(torch.nn.Module):
             encodings based on the pad mask.
         sep_idx: int
             the id of the sep token
+        actv_fxn: str
+            the transformer activation function
         """
         super().__init__()
         self.n_tokens = n_tokens
@@ -110,6 +118,7 @@ class Model(torch.nn.Module):
         self.learn_posencs = learn_posencs
         self.pad_pos_skip = pad_pos_skip
         self.sep_idx = sep_idx
+        self.actv_fxn = actv_fxn
 
     def get_device(self):
         return next(self.parameters()).get_device()
@@ -153,6 +162,7 @@ class TransformerModel(Model):
             pad_pos_skip=self.pad_pos_skip
         )
         d_hid = self.h_mult*self.d_model
+
         encoder_layer = torch.nn.TransformerEncoderLayer(
             self.d_model,
             self.n_heads,
@@ -167,6 +177,25 @@ class TransformerModel(Model):
         self.decoder = nn.Linear(self.d_model, self.n_tokens)
 
         self.init_weights()
+
+        #config_kwargs = {
+        #    "vocab_size": self.n_tokens,
+        #    "hidden_size": self.d_model,
+        #    "num_hidden_layers": self.n_layers,
+        #    "num_attention_heads": self.n_heads,
+        #    "n_ctx": self.max_posencs,
+        #    "n_embd": self.n_tokens,
+        #    "n_head": self.n_heads,
+        #    "n_inner": None,
+        #    "activation_function": self.actv_fxn,
+        #    "resid_pdrop": self.drop_p,
+        #    "embd_pdrop": self.drop_p,
+        #    "attn_pdrop": self.drop_p,
+        #}
+        #config = CONFIG_MAPPING["gpt2"]()
+        #config.update(config_kwargs)
+        ## TODO: MAKE THIS WORK
+        #self.transformer_encoder = AutoModelForCausalLM.from_config(config)
 
     def init_weights(self) -> None:
         initrange = 0.1

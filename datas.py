@@ -705,7 +705,7 @@ class Runner:
                     is_causal=True,
                     tforce=False,
                     n_steps=self.shared_exp.shape[1]-inpts.shape[1]-1,
-                    temperature=self.hyps.get("temperature", None),
+                    temperature=self.hyps.get("aug_temp", None),
                     incl_all_inpts=True,
                     blotch_p=self.hyps.get("bootstrap_blotch_p", 0)
                 )
@@ -814,7 +814,7 @@ def bootstrap_data(
                 is_causal=True,
                 tforce=False,
                 n_steps=hyps["seq_len"]-inpts.shape[1]-1,
-                temperature=hyps.get("temperature", None),
+                temperature=hyps.get("aug_temp", None),
                 incl_all_inpts=True,
                 blotch_p=hyps.get("bootstrap_blotch_p", 0)
             )
@@ -870,8 +870,11 @@ def axe_data(
     wrapped_model.eval()
     abs_tol = hyps.get("abs_axe_tol", math.inf)
     rel_tol = hyps.get("rel_axe_tol", math.inf)
+    comp_steps = hyps.get("axe_comp_steps", -1)
+    if comp_steps<0: comp_steps = np.inf
     bsize = hyps.get("val_batch_size", 500)
     n_loops = hyps.get("axe_loops", 3)
+    if n_loops<0: n_loops = np.inf
     plen = data_cache.prob_len
     device = wrapped_model.model.get_device()
     pad = tokenizer.pad_idx
@@ -888,7 +891,7 @@ def axe_data(
     with torch.no_grad():
         perm = torch.randperm(len(data_cache)).long()
         m = min(n_loops, len(data_cache)//bsize)
-        if m==0: m = 1
+        m += int(m==0)
         rng = range(m)
         if verbose: rng = tqdm(rng)
         for i in rng:
@@ -917,7 +920,7 @@ def axe_data(
                 no_grad=True,
                 prob_len=plen,
                 ret_preds=True,
-                temperature=hyps.get("temperature", None),
+                temperature=hyps.get("val_temp", None),
             )
             pred_ids = ret_dict["preds"]
             was_correct = utils.vectorized_check_correct(
@@ -926,21 +929,29 @@ def axe_data(
 
             # Subtract 1 to remove because there will always be at
             # least a single separator
-            sep_sums = torch.sum(inpts==sep, dim=-1)-1
+            sep_idxs = (inpts==sep).long()
+            sep_sums = torch.sum(sep_idxs, dim=-1)-1
             max_seps = torch.max(sep_sums)
             if max_seps==0: continue
             losses = []
             blosses = []
             masks = []
+            blotch_masks = []
+            for j in range(max_seps):
+                blotch_mask = utils.get_blotch_mask(
+                    inpts,
+                    sep_idx=sep,
+                    step_idx=j,
+                )
+                blotch_masks.append(blotch_mask.cpu())
+                if j > 0: blotch_masks[-1] = blotch_masks[-1].cpu()
+            soln_mask = utils.get_soln_mask(
+                inpts, eos_id=eos,sep_id=sep,pad_id=pad
+            )
             for j in range(-1, max_seps):
                 if j>-1:
-                    blotch_mask = utils.get_blotch_mask(
-                        inpts,
-                        sep_idx=sep,
-                        step_idx=j,
-                    )
+                    blotch_mask = blotch_masks[j].to(device)
                     did_blotch = sep_sums>j
-                    # TODO: Don't calculate unnecessary rows
                     data["inpt_pad_mask"] = inpt_pad_mask|blotch_mask
                     data["out_pad_mask"][:,:-1] = out_pad_mask[:,:-1]|\
                                                   blotch_mask[:,1:]
@@ -959,13 +970,27 @@ def axe_data(
                 else:
                     # only want to look at loss following the axing
                     omask = ~data["out_pad_mask"]
-                    # Find index of current axing
-                    ax = torch.argmax(blotch_mask.long(),dim=-1)
-                    ax = (aranges<ax[:,None])[:,1:]
+
+                    # Finds indices that loss should be compared for
+                    ax = torch.zeros(loss.shape,device=device).bool()
+                    for ii in range(j+1,min(max_seps, j+comp_steps+1)):
+                        ax = ax|blotch_masks[ii].to(device)
+                    idx = sep_sums==j+1
+                    ax[idx] = ax[idx]|soln_mask[idx]
+
+                    #if did_blotch.long().sum()>0:
+                    #    print("OG:", tokenizer.decode(inpts[did_blotch][0]))
+                    #    print("Blotch:",
+                    #        tokenizer.decode(
+                    #            inpts[did_blotch][0][blotch_mask[did_blotch][0]]))
+                    #    print("Masked:",
+                    #        tokenizer.decode(
+                    #            inpts[did_blotch][0][ax[did_blotch][0]]))
+                    #    print()
                     # Set all losses before ax to 0
-                    loss[ax] = 0
-                    omask[ax] = 0
-                    base_loss[ax] = 0
+                    loss[~ax] = 0
+                    omask[~ax] = 0
+                    base_loss[~ax] = 0
 
                     div = omask.float().sum(-1)
                     bloss = base_loss.sum(-1)/div
@@ -1003,19 +1028,6 @@ def axe_data(
                         data_cache.cache[permxs[idxs], :] = new_data.cpu()
     return aug_data
 
-def axe_step(ids, steps):
-    """
-    Removes the specified semantic step from the ids by replacing
-    it with padding.
-
-    Args:
-        ids: torch LongTensor (B,N)
-        steps: torch LongTensor (B,)
-    Returns:
-        rem_ids: torch LongTensor (B,N)
-            the remaining ids after the axing
-    """
-
 def augment_data(
         hyps,
         model,
@@ -1049,6 +1061,7 @@ def augment_data(
     """
     bsize = hyps.get("val_batch_size", 500)
     aug_loops = hyps.get("aug_loops", 3)
+    if aug_loops<0: aug_loops = np.inf
     plen = data_cache.prob_len
     device = model.get_device()
     pad = tokenizer.pad_idx
@@ -1081,7 +1094,7 @@ def augment_data(
                 # -2 for the plen+1 in inpts and inclusion of all inpts
                 n_steps=data_cache.shape[1]-plen-2,
                 incl_all_inpts=True,
-                temperature=hyps.get("temperature", None),
+                temperature=hyps.get("aug_temp", None),
                 blotch_p=hyps.get("bootstrap_blotch_p", 0)
             )
             logits = ret_dict["preds"]

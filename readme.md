@@ -67,7 +67,7 @@ then running the following command:
         the number of loops to perform in which the samples are axed,
         meaning they permanently lose a segment if the model got the
         problem correct and the relative loss difference is less than
-        some tolerance
+        some tolerance. if -1, will perform axing on all training data
     "abs_axe_tol": bool
         if true, will use absolute value of loss difference when axing
         samples. Otherwise will use the `axe_tol` as a tolerance for
@@ -75,10 +75,14 @@ then running the following command:
     "axe_tol": float
         the tolerence of the loss difference to decide when to keep
         axings
+    "axe_comp_steps": int
+        the maximum number of steps after an axing to use for the
+        loss comparison.
 
     "aug_loops": int
         if greater than 0, will use the model to augment samples in the
-        training data. Augmentations are only kept when the final answer
+        training data. If -1, will perform augmentation on all training
+        samples. Augmentations are only kept when the final answer
         is correct and the total answer is shorter than the original.
         The value of this parameter indicates the number of augmentation
         loops to perform after each epoch. Each loop attempts to augment
@@ -101,11 +105,22 @@ then running the following command:
         dataset.
     "aug_mod": int
         a modulus to determine the frequency of data manipulations.
-        manipulations are augmentations, axings, or star bootstraps
+        manipulations are augmentations, axings, or star bootstraps.
+        if negative, will wait for a training loss plateau before
+        performing another augmentation loop. If -1, will wait for
+        training loss plateaus before performing augmentation loops
+    "min_aug_gap": int
+        the minimum number of epochs to separate each augmentation loop.
+        only applies when `aug_mod` is -1
+    "aug_temp": float
+        the sampling temperature for the star bootstrapping and the
+        augmentation bootstrapping
 
     "max_val_loops": int
         enforces a limit on the number of validation iterations. This
         is useful for speeding up trainings
+    "val_temp": float
+        the sampling temperature for validation
     "n_train_loops": int
         the number of loops per epoch. this is useful if you want to
         validate more often.
