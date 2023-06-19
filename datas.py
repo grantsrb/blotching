@@ -709,8 +709,7 @@ class Runner:
                     incl_all_inpts=True,
                     blotch_p=self.hyps.get("bootstrap_blotch_p", 0)
                 )
-                logits = ret_dict["preds"]
-                preds = torch.argmax(logits, dim=-1)
+                preds = ret_dict["pred_ids"]
                 preds[:,-1] = self.tokenizer.eos_idx
                 ends = torch.argmax(
                   (preds[:,plen:]==self.tokenizer.eos_idx).long(),
@@ -818,8 +817,7 @@ def bootstrap_data(
                 incl_all_inpts=True,
                 blotch_p=hyps.get("bootstrap_blotch_p", 0)
             )
-            logits = ret_dict["preds"]
-            preds = torch.argmax(logits, dim=-1)
+            preds = ret_dict["pred_ids"]
             preds[:,-1] = tokenizer.eos_idx
 
             ends = torch.argmax(
@@ -922,7 +920,7 @@ def axe_data(
                 ret_preds=True,
                 temperature=hyps.get("val_temp", None),
             )
-            pred_ids = ret_dict["preds"]
+            pred_ids = ret_dict["pred_ids"]
             was_correct = utils.vectorized_check_correct(
                 tokenizer, data["output_ids"], pred_ids
             )
@@ -996,7 +994,7 @@ def axe_data(
                     bloss = base_loss.sum(-1)/div
 
                     loss = loss.sum(-1)/div
-                    pred_ids = ret_dict["preds"]
+                    pred_ids = ret_dict["pred_ids"]
                     pred_ids[:5] = data["output_ids"][:5]
                     is_correct = utils.vectorized_check_correct(
                         tokenizer, data["output_ids"], pred_ids
@@ -1097,8 +1095,7 @@ def augment_data(
                 temperature=hyps.get("aug_temp", None),
                 blotch_p=hyps.get("bootstrap_blotch_p", 0)
             )
-            logits = ret_dict["preds"]
-            preds = torch.argmax(logits, dim=-1)
+            preds = ret_dict["pred_ids"]
             if hyps["exp_name"] == "test": 
                 preds[:,1:] = outputs.clone()
 
@@ -1125,23 +1122,6 @@ def augment_data(
             corrects = utils.vectorized_check_correct(
                 tokenizer, outputs, pred_ids=preds[:,1:]
             )
-            ## Find last separator and eos to determine window of answer.
-            ## Then use sum of matching tokens to determine if correct.
-            #seps = outputs==sep
-
-            #last_sep_idxs = torch.argsort(
-            #    seps.long(), dim=-1, descending=True
-            #)[torch.arange(len(seps)).long(), seps.sum(-1).long()-1]
-            #soln_ends = soln_ends[:,None]
-            #soln_lens = soln_ends - last_sep_idxs[:,None]
-            #soln_idxs =(aranges<soln_ends)&(aranges>=(soln_ends-soln_lens))
-            #ans_idxs = (aranges < pred_ends[:,None])&\
-            #           (aranges>=(pred_ends[:,None]-soln_lens))
-            #corrects = torch.zeros_like(outputs).float()
-            #idx = preds[ans_idxs]==outputs[soln_idxs[:,:-1]]
-            #corrects[soln_idxs[:,:-1]] = (idx).float()
-            #corrects = corrects.sum(-1)
-            #corrects = corrects.squeeze()==soln_lens.squeeze()
             idx = shorts&corrects
             p = preds[idx].data.cpu()
 

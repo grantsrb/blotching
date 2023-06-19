@@ -301,7 +301,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             for k in keys:
                 inpt_dict[k] = inpt_dict[k].cpu()
             del inpt_dict
-        del package["preds"]
+        del package["pred_ids"]
 
         #############################################################
         # Validation
@@ -358,7 +358,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                         acc = package["acc"]
                         len_diff = package["len_diff"]
                         len_perc = package["len_percent"]
-                        preds = package["preds"]
+                        preds = package["pred_ids"]
 
                         corrects = utils.vectorized_check_correct(
                             tokenizer,
@@ -634,7 +634,7 @@ def print_examples(inpt_dict, tokenizer, n_samps=5):
                 the ground truth of the compressed context ids
             output_ids: torch tensor (B,S2)
                 the target ids
-            pred: torch tensor (B,S1,L)
+            pred_ids: torch tensor (B,S1,L)
                 the predicted compressed context logits
         tokenizer: huggingface tokenizer
         n_samps: int
@@ -642,7 +642,7 @@ def print_examples(inpt_dict, tokenizer, n_samps=5):
     Returns:
         examples: list of dicts of str
             a list of the printed examples. the dicts have keys of
-            "targs" and "preds"
+            "targs" and "pred_ids"
         logstr: str
             a single string of one printout loop
     """
@@ -650,7 +650,7 @@ def print_examples(inpt_dict, tokenizer, n_samps=5):
     targs = inpt_dict["input_ids"]
     tensors.append(targs)
     preds = dict()
-    for k in ["preds"]:
+    for k in ["pred_ids"]:
         if len(inpt_dict[k].shape)==3:
             preds[k] = inpt_dict[k].argmax(-1)
         else: preds[k] = inpt_dict[k]

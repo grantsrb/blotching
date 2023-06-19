@@ -147,63 +147,6 @@ class Model(torch.nn.Module):
         ps = torch.nn.functional.softmax( logits/temperature, dim=-1 )
         return torch.multinomial(ps, num_samples=1)
 
-
-class TransformerModel(Model):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.model_type = 'Transformer'
-        self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
-        self.pos_encoder = globals()[self.posenc_type](
-            d_model=self.d_model,
-            posenc_drop_p=self.posenc_drop_p,
-            drop_p=self.drop_p,
-            max_len=self.max_posencs,
-            learnable=self.learn_posencs,
-            pad_pos_skip=self.pad_pos_skip
-        )
-        d_hid = self.h_mult*self.d_model
-
-        encoder_layer = torch.nn.TransformerEncoderLayer(
-            self.d_model,
-            self.n_heads,
-            d_hid,
-            self.drop_p,
-            batch_first=True,
-            norm_first=self.norm_first
-        )
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer, self.n_layers
-        )
-        self.decoder = nn.Linear(self.d_model, self.n_tokens)
-
-        self.init_weights()
-
-        #config_kwargs = {
-        #    "vocab_size": self.n_tokens,
-        #    "hidden_size": self.d_model,
-        #    "num_hidden_layers": self.n_layers,
-        #    "num_attention_heads": self.n_heads,
-        #    "n_ctx": self.max_posencs,
-        #    "n_embd": self.n_tokens,
-        #    "n_head": self.n_heads,
-        #    "n_inner": None,
-        #    "activation_function": self.actv_fxn,
-        #    "resid_pdrop": self.drop_p,
-        #    "embd_pdrop": self.drop_p,
-        #    "attn_pdrop": self.drop_p,
-        #}
-        #config = CONFIG_MAPPING["gpt2"]()
-        #config.update(config_kwargs)
-        ## TODO: MAKE THIS WORK
-        #self.transformer_encoder = AutoModelForCausalLM.from_config(config)
-
-    def init_weights(self) -> None:
-        initrange = 0.1
-        self.embeddings.weight.data.uniform_(-initrange, initrange)
-        self.embeddings.weight.data *= math.sqrt(self.d_model)
-        self.decoder.bias.data.zero_()
-        self.decoder.weight.data.uniform_(-initrange, initrange)
-
     def forward(self, src:torch.Tensor,
                       mask:torch.Tensor=None,
                       pad_mask:torch.Tensor=None,
@@ -278,6 +221,207 @@ class TransformerModel(Model):
             )
         return ret_dict
 
+
+class HFModel(Model):
+    """
+    Uses a huggingface model base for the transformer.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'Transformer'
+        config_kwargs = {
+            "vocab_size": self.n_tokens,
+            "hidden_size": self.d_model,
+            "num_hidden_layers": self.n_layers,
+            "num_attention_heads": self.n_heads,
+            "n_ctx": self.max_posencs,
+            "n_embd": self.n_tokens,
+            "n_head": self.n_heads,
+            "n_inner": None,
+            "activation_function": self.actv_fxn,
+            "resid_pdrop": self.drop_p,
+            "embd_pdrop": self.drop_p,
+            "attn_pdrop": self.drop_p,
+        }
+        config = CONFIG_MAPPING["gpt2"]()
+        config.update(config_kwargs)
+        self.transformer = AutoModelForCausalLM.from_config(config)
+        self.embeddings = self.transformer_encoder.get_input_embeddings()
+
+        self.pos_encoder = globals()[self.posenc_type](
+            d_model=self.d_model,
+            posenc_drop_p=self.posenc_drop_p,
+            drop_p=self.drop_p,
+            max_len=self.max_posencs,
+            learnable=self.learn_posencs,
+            pad_pos_skip=self.pad_pos_skip
+        )
+        d_hid = self.h_mult*self.d_model
+        self.arange = torch.nn.register_buffer(
+            "arange", torch.arange(self.max_posencs)
+        )
+
+    def get_pos_ids(self, pad_mask):
+        """
+        Returns the position ids based off of the pad mask. For example:
+
+            Pad Mask: [0,1,0,1,1,0,0,1]
+            Pos Ids:  [0,0,1,0,0,2,3,0]
+
+        Args:
+            pad_mask: bool tensor (B,S)
+        Returns:
+            pos_ids: long tensor (B,S)
+        """
+        if pad_mask is None: return None
+        B,S = pad_mask.shape
+        rep = self.arange[:S].repeat((B,1))
+
+        if not self.pad_pos_skip:
+            return rep
+
+        pos_ids = torch.zeros((B,S), device=pad_mask.get_device()).long()
+        mask_sums = (1-pad_mask.long()).sum(-1)
+
+        pos_ids[~pad_mask.bool()] = rep[rep<mask_sums[:,None]]
+        return pos_ids
+
+    def tforce_fwd(self, src:torch.Tensor,
+                      mask:torch.Tensor=None,
+                      pad_mask:torch.Tensor=None,
+                      *args, **kwargs):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Tensor, shape ``[seq_len, seq_len]``
+                currently unused in this model type
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
+        Returns:
+            output Tensor of shape ``[bsize, seq_len, n_tokens]``
+        """
+        assert mask is None
+        pos_ids = self.get_pos_ids(pad_mask)
+        output = self.transformer_encoder(
+            input_ids=src,
+            attention_mask=pad_mask,
+            position_ids=pos_ids,
+        )
+        return {
+            "logits": output.logits, "pred_ids": output.logits.argmax(-1)
+        }
+
+    def freedom_fwd(self, src:torch.Tensor,
+                      mask:torch.Tensor=None,
+                      pad_mask:torch.Tensor=None,
+                      n_steps:int=10,
+                      incl_all_inpts:bool=False,
+                      temperature=None,
+                      *args, **kwargs):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Tensor, shape ``[seq_len, seq_len]``
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            is_causal: bool
+                If specified, applies a causal mask as mask (optional)
+                and ignores attn_mask for computing scaled dot product
+                attention.
+            n_steps: int
+                the number of prediction steps if not using teacher
+                forcing
+            incl_all_inpts: bool
+                if true, will include all input tokens in the output
+                prediction tensor. otherwise only includes "predicted
+                spaces". "predicted spaces" includes the shifted initial
+                inputs.  This is useful to save a concatenation during
+                the data bootstrapping phase.
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
+        Returns:
+            output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
+        """
+        assert mask is None
+        B,S = src.shape
+        n_loops = n_steps + 1
+
+        ids = torch.nn.functional.pad(
+            src, (0,n_loops), value=0
+        )
+        pad_mask = torch.nn.functional.pad(
+            pad_mask, (0, n_loops), value=False
+        )
+        pos_ids = self.get_pos_ids(pad_mask)
+        logits = torch.zeros(
+            (B,S+n_steps+incl_all_inpts,self.n_tokens),
+            device=DEVICES[embs.get_device()]
+        )
+        logits[:,:S-1+incl_all_inpts].scatter_(
+            dim=-1,
+            index=src[:, 1-incl_all_inpts:S, None],
+            src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
+        )
+
+        past_key_values = None
+        for step in range(n_loops):
+            ret = self.transformer_encoder(
+                ids[:,:S+step],
+                src_key_padding_mask=pad_mask[:,:S+step],
+                position_ids=pos_ids[:,:S+step],
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            past_key_values = ret.past_key_values
+            pred = ret.logits[:,-1]
+            logits[:,S-1+step+incl_all_inpts] = pred
+            argmaxs = self.sample_with_temperature(
+                pred, temperature
+            ).squeeze()
+            ids[:,S+step] = argmaxs
+        return {
+          "logits": logits, "pred_ids": ids[:,int(not incl_all_inpts):]
+        }
+
+
+class TransformerModel(Model):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'Transformer'
+        self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
+        self.pos_encoder = globals()[self.posenc_type](
+            d_model=self.d_model,
+            posenc_drop_p=self.posenc_drop_p,
+            drop_p=self.drop_p,
+            max_len=self.max_posencs,
+            learnable=self.learn_posencs,
+            pad_pos_skip=self.pad_pos_skip
+        )
+        d_hid = self.h_mult*self.d_model
+
+        encoder_layer = torch.nn.TransformerEncoderLayer(
+            self.d_model,
+            self.n_heads,
+            d_hid,
+            self.drop_p,
+            batch_first=True,
+            norm_first=self.norm_first
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer, self.n_layers
+        )
+        self.decoder = nn.Linear(self.d_model, self.n_tokens)
+
+        self.init_weights()
+
+    def init_weights(self) -> None:
+        initrange = 0.1
+        self.embeddings.weight.data.uniform_(-initrange, initrange)
+        self.embeddings.weight.data *= math.sqrt(self.d_model)
+        self.decoder.bias.data.zero_()
+        self.decoder.weight.data.uniform_(-initrange, initrange)
+
     def tforce_fwd(self, src:torch.Tensor,
                       mask:torch.Tensor=None,
                       pad_mask:torch.Tensor=None,
@@ -310,7 +454,8 @@ class TransformerModel(Model):
             mask=mask,
             src_key_padding_mask=pad_mask
         )
-        return {"preds": self.decoder(output)}
+        logits = self.decoder(output)
+        return { "logits": logits, "pred_ids": logits.argmax(-1) }
 
     def freedom_fwd(self, src:torch.Tensor,
                       mask:torch.Tensor=None,
@@ -357,17 +502,20 @@ class TransformerModel(Model):
         pad_mask = torch.nn.functional.pad(
             pad_mask, (0, n_loops), value=False
         )
+        ids = torch.nn.functional.pad(
+            src, (0, n_loops), value=0
+        )
         embs = torch.nn.functional.pad(
             embs, (0,0,0,n_loops), value=0
         )
-        preds = torch.zeros(
+        logits = torch.zeros(
             (B,S+n_steps+incl_all_inpts,self.n_tokens),
             device=DEVICES[embs.get_device()]
         )
-        preds[:,:S-1+incl_all_inpts].scatter_(
+        logits[:,:S-1+incl_all_inpts].scatter_(
             dim=-1,
             index=src[:, 1-incl_all_inpts:S, None],
-            src=torch.ones_like(preds[:, :S-1+incl_all_inpts])
+            src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
         )
         if mask is None:
             mask = generate_square_subsequent_mask(
@@ -388,13 +536,15 @@ class TransformerModel(Model):
                 src_key_padding_mask=pad_mask[:,:S+step]
             )
             pred = self.decoder(output[:,-1])
-            preds[:,S-1+step+incl_all_inpts] = pred
-            if step < n_steps:
-                argmaxs = self.sample_with_temperature(
-                    pred, temperature
-                ).squeeze()
-                embs[:,S+step] = self.embeddings(argmaxs)
-        return {"preds": preds}
+            logits[:,S-1+step+incl_all_inpts] = pred
+            argmaxs = self.sample_with_temperature(
+                pred, temperature
+            ).squeeze()
+            ids[:,S+step] = argmaxs
+            embs[:,S+step] = self.embeddings(argmaxs)
+        return {
+            "logits": logits, "pred_ids": ids[:,int(not incl_all_inpts):]
+        }
 
 class BlotchTokenModel(TransformerModel):
     """
@@ -494,7 +644,8 @@ class BlotchTokenModel(TransformerModel):
             )
             ret_dict["blotch_mask"] = blotch_mask
             # Remove the blotch token
-            ret_dict["preds"] = ret_dict["preds"][:,1:]
+            ret_dict["logits"] = ret_dict["logits"][:,1:]
+            ret_dict["pred_ids"] = ret_dict["pred_ids"][:,1:]
         else:
             src = torch.cat([blotch_ids[...,None], src], dim=-1)
             pad_mask = torch.nn.functional.pad(
@@ -512,7 +663,8 @@ class BlotchTokenModel(TransformerModel):
             # Don't need to remove blotch token because freedom_fwd
             # always does it for us.
             if not incl_all_inpts:
-                ret_dict["preds"] = ret_dict["preds"][:,1:]
+                ret_dict["logits"] = ret_dict["logits"][:,1:]
+                ret_dict["pred_ids"] = ret_dict["pred_ids"][:,1:]
         return ret_dict
 
 def generate_square_subsequent_mask(sz: int) -> Tensor:
@@ -755,9 +907,8 @@ class LossWrapper(torch.nn.Module):
                 "loss": torch tensor (1,) or (B,)
                 "acc": torch tensor (1,) or (B,)
                     the raw accuracy for the non-rmb task
-                "preds": torch tensor (B,S,P)
-                    the prediction logits. only returned if ret_preds is
-                    true
+                "preds": torch tensor (B,S)
+                    the prediction ids
         """
         ret_dict = dict()
         pad_idx = self.tokenizer.pad_idx
@@ -817,7 +968,7 @@ class LossWrapper(torch.nn.Module):
                 blotch_p=blotch_p,
                 tokenizer=self.tokenizer
             )
-            preds = ret_dict["preds"]
+            logits = ret_dict["logits"]
             if "blotch_mask" in ret_dict:
                 blotch_mask = ret_dict["blotch_mask"]
                 inpt_pad_mask = inpt_pad_mask|blotch_mask
@@ -839,8 +990,8 @@ class LossWrapper(torch.nn.Module):
                 blotch_p=blotch_p,
                 tokenizer=self.tokenizer
             )
-            preds = ret_dict["preds"]
-            #print("preds:", preds.shape)
+            logits = ret_dict["logits"]
+            #print("logits:", logits.shape)
             #print("Sep:", self.tokenizer.sep_idx)
             #print("eqls:", self.tokenizer.sep_idx)
             #print("inpt:", data["input_ids"].shape)
@@ -880,8 +1031,8 @@ class LossWrapper(torch.nn.Module):
         out_ids = data["output_ids"]
         inpt_mask = ~inpt_pad_mask.reshape(-1)
         out_mask =  ~out_pad_mask.reshape(-1)
-        ps = preds[:,int(incl_all_inpts):].reshape(
-            -1, preds.shape[-1]
+        ps = logits[:,int(incl_all_inpts):].reshape(
+            -1, logits.shape[-1]
         )[inpt_mask]
         labels = out_ids.reshape(-1)[out_mask]
         reduction = "mean" if reduce_metrics else "none"
@@ -903,20 +1054,18 @@ class LossWrapper(torch.nn.Module):
         # Case where soln len exceeds seq_len. Ideally this doesn't
         # happen
         out_ends[out_ends==0] = out_ends.shape[-1]-1 
-        pred_ids = preds[:,int(incl_all_inpts):].argmax(-1)
+        pred_ids = logits[:,int(incl_all_inpts):].argmax(-1)
         pred_ids[:,-1] = eos_idx
         pred_ends = torch.argmax( (pred_ids==eos_idx).long(), dim=-1 )
         diffs = (out_ends-pred_ends).float()
         ret_dict["len_diff"] = diffs.mean()
         ret_dict["len_percent"] = (diffs/out_ends).mean()*100
 
-        if ret_preds:
-            ret_dict["preds"] = preds.argmax(-1)
-            # Replace predictions with ground truth if not training on
-            # initial prob
-            if not incl_intl_prob and tforce:
-                ids = data["output_ids"][...,:prob_len]
-                ret_dict["preds"][...,:prob_len] = ids
+        # Replace predictions with ground truth if not training on
+        # initial prob
+        if not incl_intl_prob and tforce:
+            ids = data["output_ids"][...,:prob_len]
+            ret_dict["pred_ids"][...,:prob_len] = ids
         return ret_dict
 
 def loss_and_acc(preds, labels, attn, loss_fxn, loss_scale=1,top_k=None):
