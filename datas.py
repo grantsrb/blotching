@@ -7,6 +7,7 @@ import numpy as np
 from tqdm import tqdm
 import utils
 import math
+import collections
 
 class DataIterable:
     def __init__(self, data, batch_size=128, meta_data=None):
@@ -258,7 +259,8 @@ class Tokenizer:
                  pad="P",
                  null=" ",
                  sep="|",
-                 eos="E"):
+                 eos="E",
+                 unk="U"):
         """
         Args:
             str2idx: dict
@@ -282,15 +284,21 @@ class Tokenizer:
             eos: str
                 the eos token. currently will break if the eos
                 token is longer than a single character.
+            unk: str
+                the unknown token. currently will break if the unk
+                token is longer than a single character.
         """
         assert len(pad)==1 and len(null)==1
         self.pad = pad
         self.null = null
         self.eos = eos
         self.sep = sep
+        self.unk = unk
         self.delimeters = sorted(delimeters, key=lambda x: -len(x))
         self.str2idx = {**str2idx}
-        self.idx2str = {v:k for k,v in str2idx.items()}
+        self.idx2str = collections.defaultdict(lambda: self.null)
+        for k,v in str2idx.items():
+            self.idx2str[v] = k
         self.pad_idx = self.str2idx[self.pad]
         self.null_idx = self.str2idx[self.null]
         self.sep_idx = self.str2idx[self.sep]
@@ -869,7 +877,7 @@ def axe_data(
     abs_tol = hyps.get("abs_axe_tol", math.inf)
     rel_tol = hyps.get("rel_axe_tol", math.inf)
     comp_steps = hyps.get("axe_comp_steps", -1)
-    if comp_steps<0: comp_steps = np.inf
+    if comp_steps<=0: comp_steps = np.inf
     bsize = hyps.get("val_batch_size", 500)
     n_loops = hyps.get("axe_loops", 3)
     if n_loops<0: n_loops = np.inf

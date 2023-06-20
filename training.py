@@ -246,7 +246,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 a = round(acc.item(), dec)
                 c = round(100*i/nloops, 2)
                 t = round(time.time()-starttime, 3)
-                s = "Loss: {} -Acc: {}".format(l,a)
+                s = "Loss: {} - Acc: {}".format(l,a)
                 s += " - {}% {}s   ".format(c,t)
                 print(s, end=int(len(s)/2)*" " + "\r")
             if hyps["exp_name"]=="test" and i>=30: break
@@ -618,6 +618,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
 
         if rank==0 and verbose:
             print("Total Training Samples:", len(data_cache))
+            s = "Total Dur: {}s".format(round(time.time()-epochtime))
+            print(s)
         keys = list(package.keys())
         for k in keys: del package[k]
         if hyps["exp_name"]=="test" and epoch>2: break
@@ -751,9 +753,14 @@ def hyper_error_catching(hyps):
     choices are set and some obviously wrong hyperparameter settings
     are changed to what the experimenter meant.
     """
-    if not hyps["blotch_p"] and not hyps.get("blotch_p_min", None) and\
-            not hyps.get("blotch_p_max", None):
+    if not hyps.get("blotch_p_min", None) and\
+                                not hyps.get("blotch_p_max", None) and\
+                                hyps["model_type"]=="BlotchTokenModel":
         hyps["model_type"] = "TransformerModel"
+    elif not hyps.get("blotch_p_min", None) and\
+                                not hyps.get("blotch_p_max", None) and\
+                                hyps["model_type"]=="HFBlotchTokenModel":
+        hyps["model_type"] = "HFModel"
     if "init_data" in hyps:
         print("assuming init_data was meant to be init_samples")
         hyps["init_samples"] = hyps["init_data"]
