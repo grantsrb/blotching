@@ -173,10 +173,10 @@ if __name__=="__main__":
         plen = data_cache.prob_len
         if verbose and rank==0: print("Evaluating Model")
         n_loops = len(iter(data_cache))
-        if hyps["model_type"]=="TransformerModel":
+        if hyps["model_type"] in {"TransformerModel", "HFModel"}:
             bps = [0.0]
         else:
-            bps = np.arange(max(model.n_btokens,1))/model.bp_gran
+            bps = np.arange(max(model.n_btokens,1))/(model.bp_gran-1)
         for blotch_p in bps:
             print("\nBp:", blotch_p)
             for i,data in enumerate(data_cache):
@@ -192,7 +192,6 @@ if __name__=="__main__":
 
                     package = wrapped_model(
                         data,
-                        ret_preds=True,
                         seq_len=hyps["seq_len"],
                         tforce=False,
                         prob_len=plen,
@@ -200,7 +199,7 @@ if __name__=="__main__":
                         incl_all_inpts=True,
                         blotch_p=blotch_p,
                     )
-                    pred_ids = package["preds"]
+                    pred_ids = package["pred_ids"]
 
                     probs =   meta_data["probs"]
                     solns =   meta_data["solns"]
@@ -258,3 +257,5 @@ if __name__=="__main__":
         if not testing:
             df.to_csv(csv_path, mode="w", index=False, header=True)
             print("Saved to", csv_path)
+        print()
+        print()

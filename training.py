@@ -325,12 +325,12 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 if nloops is None: nloops = len(iterable)
                 nloops = min(nloops, len(iterable))
                 blotch_ps = [0]
-                #if hyps["model_type"]=="TransformerModel":
-                #    blotch_ps = [0.0]
-                #elif hyps["exp_name"]=="test": blotch_ps = [0]
-                #else:
-                #    blotch_ps = np.arange(max(model.n_btokens//2,1))*2
-                #    blotch_ps = blotch_ps/model.bp_gran
+                if model.n_btokens==0:
+                    blotch_ps = [0.0]
+                elif hyps["exp_name"]=="test": blotch_ps = [0]
+                else:
+                    blotch_ps = np.arange(min(model.n_btokens,3))
+                    blotch_ps = blotch_ps/model.bp_gran
                 for bp in blotch_ps:
                     print("\nBlotch P:", bp)
                     avg_loss = 0
@@ -400,7 +400,11 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     "output_ids": data["output_ids"],
                     **package,
                 }
-                examples,s = print_examples( inpt_dict, tokenizer )
+                try:
+                    examples,s = print_examples( inpt_dict, tokenizer )
+                except:
+                    print("Keys:", inpt_dict.keys())
+                    assert False
                 keys = list(inpt_dict.keys())
                 for k in keys: inpt_dict[k] = inpt_dict[k].cpu()
                 del inpt_dict
