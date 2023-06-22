@@ -130,6 +130,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         print("Using Sequence Length:", hyps["seq_len"])
 
     model = make_model(hyps)
+    hyps["n_btokens"] = model.n_btokens
     hyps["model_parallel"] = hyps.get("model_parallel", False)
     if not hyps["model_parallel"]: model.to(rank)
 
@@ -329,7 +330,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     blotch_ps = [0.0]
                 elif hyps["exp_name"]=="test": blotch_ps = [0]
                 else:
-                    blotch_ps = np.arange(min(model.n_btokens,3))
+                    blotch_ps = np.arange(0,model.n_btokens,3)
                     blotch_ps = blotch_ps/model.bp_gran
                 for bp in blotch_ps:
                     print("\nBlotch P:", bp)
@@ -389,7 +390,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                         val_len_diff = round(avg_len_diff/div, 5)
                         val_len_perc = round(avg_len_perc/div, 5)
                         val_correct =  round(avg_correct/div, 5)
-                    if hyps["exp_name"]=="test": break
             if verbose:
                 print()
                 s = "Example Predictions On Validation"

@@ -27,9 +27,9 @@ class Model(torch.nn.Module):
                        norm_first:bool=True,
                        blotch_p:float=0,
                        blotch_p_max:float=None,
-                       blotch_p_gran:int=10,
-                       bp_token_distr:str="uniform",
+                       blotch_p_gran:int=None,
                        n_btokens:int=None,
+                       bp_token_distr:str="uniform",
                        drop_p:float=0.5,
                        max_posencs:int=1000,
                        posenc_drop_p:float=None,
@@ -65,6 +65,9 @@ class Model(torch.nn.Module):
         blotch_p_gran: int
             the granularity of the blotch p the blotch token values will
             be divided by this value to determine the actual blotch p
+        n_btokens: int or None
+            the number of blotching tokens. If none or if `blotch_p_gran`
+            is not None, will be decided by `blotch_p_gran`
         bp_token_distr: str { "uniform", "zipf_<n>", "poisson", "linear" }
             the distribution by which to sample the blotch_p tokens.
             Any arguments that include "zipf_" will use the following
@@ -102,12 +105,16 @@ class Model(torch.nn.Module):
         self.h_mult = h_mult
         self.n_layers = n_layers
         self.blotch_p = blotch_p
+        self.bp_max  = blotch_p_max
         self.bp_gran = blotch_p_gran 
+        self.n_btokens = n_btokens
         #self.bp_token_distr = self.get_bp_distr_fxn(bp_token_distr)
         if blotch_p_max:
-            self.bp_max  = blotch_p_max
-            # Add 1 to include both 0 and max
-            self.n_btokens = max(int(self.bp_max*self.bp_gran)+1, 2)
+            if self.bp_gran:
+                # Add 1 to include both 0 and max
+                self.n_btokens = max(int(self.bp_max*self.bp_gran)+1, 2)
+            elif self.n_btokens:
+                self.bp_gran = (self.n_btokens-1)/self.bp_max
             print("Num Blotch Tokens:", self.n_btokens)
             print(
                 "Possible Bps:",
@@ -159,7 +166,7 @@ class Model(torch.nn.Module):
     def get_device(self):
         return next(self.parameters()).get_device()
 
-    def get_blotch_ids(self, blotch_ps):
+    def get_blotch_ids(self, blotch_ps, eps=0.001):
         """
         This function takes a float or tensor of blotch probabilities
         and converts it into an id tensor corresponding to the blotch
@@ -168,13 +175,18 @@ class Model(torch.nn.Module):
 
         Args:
             blotch_ps: float or FloatTensor (N,)
+            eps: float
+                a small value to avoid improper integer arithmetic.
+                this value is added to the blotch_p x gran product
+                to ensure the value surpasses the apprpriate threshold
         Returns:
             blotch_ids: LongTensor (N,)
         """
         if type(blotch_ps)!=type(torch.Tensor()):
             blotch_ps = torch.full((1,), blotch_ps)
-        if self.bp_max == 0: blotch_ps = torch.zeros_like(blotch_ps)
-        blotch_ids = torch.floor(blotch_ps*self.n_btokens)
+        blotch_ids = torch.clamp(
+            blotch_ps*self.bp_gran+eps, min=0, max=self.n_btokens-1
+        ).long()
         blotch_ps = blotch_ids.float()/self.bp_gran
         return blotch_ids.long() + self.boffset, blotch_ps
 
@@ -242,6 +254,15 @@ class Model(torch.nn.Module):
                     sep_idx=self.sep_idx,
                     blotch_p=self.blotch_p,
                 )
+                #pmask = pad_mask|blotch_mask
+                #tok = kwargs["tokenizer"]
+                #for i in range(5):
+                #    print("before:", tok.decode(src[i][~pad_mask[i]]))
+                #    print("after:", tok.decode(src[i][~pmask[i]]))
+                #    print()
+                #print()
+                #print()
+
                 pad_mask = pad_mask|blotch_mask
 
             ret_dict = self.tforce_fwd(
@@ -254,6 +275,7 @@ class Model(torch.nn.Module):
             if (self.blotch_p and self.training) or blotch_p:
                 ret_dict["blotch_mask"] = blotch_mask
         else:
+
             ret_dict = self.freedom_fwd(
                 src=src,
                 mask=mask,
@@ -287,16 +309,18 @@ class HFModel(Model):
             "activation_function": self.actv_fxn,
             "resid_pdrop": self.drop_p,
             "embd_pdrop": 0,
-            "attn_pdrop": 0,
+            "attn_pdrop": self.drop_p,
             "scale_attn_weights": True,
             "scale_attn_by_inverse_layer_idx": False,
             "tie_word_embeddings": False,
+            "torch_dtype": "float32",
         }
         config = GPT2Config()
         config.update(config_kwargs)
         self.encoder = AutoModelForCausalLM.from_config(config)
         wpe = self.encoder.transformer.wpe
-        for p in wpe.parameters():
+        for name, p in wpe.named_parameters():
+            print("Turning off gradients for", name)
             p.requires_grad = self.learn_posencs
         pe = globals()[self.posenc_type](
             d_model=self.d_model,
@@ -304,12 +328,11 @@ class HFModel(Model):
             learnable=self.learn_posencs,
             pad_pos_skip=self.pad_pos_skip
         )
-        wpe.weight.data[:] = pe.pe[:len(wpe.weight.data)]
+        wpe.weight.data[:] = pe.pe.data[:len(wpe.weight.data)]
 
         self.embeddings = self.encoder.get_input_embeddings()
-        self.decoder = nn.Linear( self.d_model, self.n_tokens)
+        self.decoder = nn.Linear( self.d_model, self.n_tokens )
         self.encoder.lm_head = self.decoder
-        self.encoder.transformer.ln_f = Identity()
 
         self.init_weights()
 
@@ -490,7 +513,7 @@ class HFBlotchTokenModel(HFModel):
               output Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
         """
         # Get appropriate blotch ids
-        if blotch_p is None: blotch_p = torch.rand(len(src))
+        if blotch_p is None: blotch_p = torch.rand(len(src))*self.bp_max
         blotch_ids, blotch_p = self.get_blotch_ids(blotch_p)
         if len(blotch_ids)!=len(src):
             blotch_ids = torch.full((len(src),), blotch_ids.item())
@@ -516,6 +539,7 @@ class HFBlotchTokenModel(HFModel):
                 sep_idx=self.sep_idx,
                 blotch_p=blotch_p,
             )
+
             pad_mask = pad_mask|blotch_mask.to(DEVICES[pad_mask.get_device()])
 
             pad_mask = torch.nn.functional.pad(
@@ -535,6 +559,7 @@ class HFBlotchTokenModel(HFModel):
             ret_dict["logits"] = ret_dict["logits"][:,1:]
             ret_dict["pred_ids"] = ret_dict["pred_ids"][:,1:]
         else:
+
             src = torch.cat([blotch_ids[:,None], src], dim=-1)
             pad_mask = torch.nn.functional.pad(
                 pad_mask, (1, 0), value=False
@@ -777,7 +802,7 @@ class BlotchTokenModel(TransformerModel):
               output Tensor of shape ``[bsize,seq_len+n_steps,boffset]``
         """
         # Get appropriate blotch ids
-        if blotch_p is None: blotch_p = torch.rand(len(src))
+        if blotch_p is None: blotch_p = torch.rand(len(src))*self.bp_max
         blotch_ids, blotch_p = self.get_blotch_ids(blotch_p)
         if len(blotch_ids)!=len(src):
             blotch_ids = torch.full((len(src),), blotch_ids.item())
@@ -1123,14 +1148,6 @@ class LossWrapper(torch.nn.Module):
                 tokenizer=self.tokenizer
             )
             logits = ret_dict["logits"]
-            #print(
-            #    "input:",
-            #    data["input_ids"][0,:plen][~inpt_pad_mask[0,:plen]]
-            #)
-            #print(
-            #  "output:",
-            #  data["output_ids"][0,prob_len:][~out_pad_mask[0,prob_len:]]
-            #)
 
         if not incl_intl_prob:
             if prob_len is None:

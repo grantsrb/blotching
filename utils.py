@@ -261,7 +261,7 @@ def get_blotch_mask(
             prev_row = row
     else:
         sep_coords = torch.nonzero(seps)
-        if type(blotch_p)==type(float()):
+        if type(blotch_p)==type(float()) or type(blotch_p)==type(int()):
             blotch_p = torch.full((1,), blotch_p)
         elif len(blotch_p.shape)==1: blotch_p = blotch_p[..., None].cpu()
         do_blotches = torch.rand(idxs.shape)<=blotch_p
