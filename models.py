@@ -592,7 +592,8 @@ class TransformerModel(Model):
     def tforce_fwd(self, src:torch.Tensor,
                       mask:torch.Tensor=None,
                       pad_mask:torch.Tensor=None,
-                      is_causal:bool=None):
+                      is_causal:bool=None,
+                      *args, **kwargs):
         """
         Arguments:
             src: Tensor, shape ``[bsize, seq_len]``
@@ -631,7 +632,8 @@ class TransformerModel(Model):
                       n_steps:int=10,
                       incl_all_inpts:bool=False,
                       pad_pos_skip:bool=False,
-                      temperature=None):
+                      temperature=None,
+                      *args, **kwargs):
         """
         Arguments:
             src: Tensor, shape ``[bsize, seq_len]``
