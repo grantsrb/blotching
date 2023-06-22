@@ -130,6 +130,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         print("Using Sequence Length:", hyps["seq_len"])
 
     model = make_model(hyps)
+    hyps["n_btokens"] = model.n_btokens
     hyps["model_parallel"] = hyps.get("model_parallel", False)
     if not hyps["model_parallel"]: model.to(rank)
 

@@ -287,10 +287,11 @@ class HFModel(Model):
             "activation_function": self.actv_fxn,
             "resid_pdrop": self.drop_p,
             "embd_pdrop": 0,
-            "attn_pdrop": 0,
+            "attn_pdrop": self.drop_p,
             "scale_attn_weights": True,
             "scale_attn_by_inverse_layer_idx": False,
             "tie_word_embeddings": False,
+            "torch_dtype": "float32",
         }
         config = GPT2Config()
         config.update(config_kwargs)
