@@ -876,8 +876,8 @@ def axe_data(
     wrapped_model.eval()
     abs_tol = hyps.get("abs_axe_tol", math.inf)
     rel_tol = hyps.get("rel_axe_tol", math.inf)
-    comp_steps = hyps.get("axe_comp_steps", -1)
-    if comp_steps<=0: comp_steps = np.inf
+    comp_steps = hyps.get("axe_comp_steps", None)
+    if not comp_steps or comp_steps<=0: comp_steps = np.inf
     bsize = hyps.get("val_batch_size", 500)
     n_loops = hyps.get("axe_loops", 3)
     if n_loops<0: n_loops = np.inf

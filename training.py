@@ -748,7 +748,18 @@ def make_model(hyps):
     model = models.__dict__[hyps["model_type"]](**hyps)
     if checkpt:
         print("Initializing from checkpoint", init_checkpt)
-        model.load_state_dict(checkpt["state_dict"])
+        try:
+            model.load_state_dict(checkpt["state_dict"])
+        except:
+            chkpt_keys = set(checkpt["state_dict"].keys())
+            model_keys = set(model.state_dict().keys())
+            diff = chkpt_keys.symmetric_difference(model_keys)
+            print("Model Keys:")
+            for k in model_keys:
+                if k in diff: print(k)
+            print("Checkpt Keys:")
+            for k in chkpt_keys:
+                if k in diff: print(k)
     return model
 
 def hyper_error_catching(hyps):
@@ -770,5 +781,7 @@ def hyper_error_catching(hyps):
         hyps["init_samples"] = hyps["init_data"]
     if hyps["init_samples"] < hyps["batch_size"]:
         hyps["batch_size"] = hyps["init_samples"]
+    if not hyps.get("abs_axe_tol", None): hyps["abs_axe_tol"] = np.inf
+    if not hyps.get("rel_axe_tol", None): hyps["rel_axe_tol"] = np.inf
     return hyps
 
