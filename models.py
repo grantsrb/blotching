@@ -115,15 +115,14 @@ class Model(torch.nn.Module):
         self.n_layers = n_layers
         self.blotch_p = blotch_p
         self.bp_max  = blotch_p_max
-        self.bp_gran = blotch_p_gran 
+        self.bp_gran = blotch_p_gran
         self.n_btokens = n_btokens
         #self.bp_token_distr = self.get_bp_distr_fxn(bp_token_distr)
         if blotch_p_max:
             if self.bp_gran:
                 # Add 1 to include both 0 and max
                 self.n_btokens = max(int(self.bp_max*self.bp_gran)+1, 2)
-            elif self.n_btokens:
-                self.bp_gran = (self.n_btokens-1)/self.bp_max
+            self.bp_gran = (self.n_btokens-1)/self.bp_max
             print("Num Blotch Tokens:", self.n_btokens)
             print(
                 "Possible Bps:",
@@ -632,7 +631,7 @@ class FrankenModel(Model):
             wpe.weight.data[:] = pe.pe.data[:len(wpe.weight.data)]
 
             ######### TODO DELETEME
-            wpe.weight.data[:] = 0
+            wpe.weight.data[:] = 1
             self.pos_encoder = globals()[self.posenc_type](
                 d_model=self.d_model,
                 posenc_drop_p=self.posenc_drop_p,
@@ -718,123 +717,70 @@ class FrankenModel(Model):
         Returns:
             output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
         """
-        #assert mask is None
-        #B,S = src.shape
-        #n_loops = n_steps + 1
-
-        #ids = torch.nn.functional.pad(
-        #    src, (0,n_loops), value=0
-        #)
-        #pad_mask = torch.nn.functional.pad(
-        #    ~pad_mask.bool(), (0, n_loops), value=True
-        #)
-        #pos_ids = get_pos_ids(
-        #    pad_mask, arange=self.arange, pad_pos_skip=self.pad_pos_skip
-        #)
-        #logits = torch.zeros(
-        #    (B,S+n_steps+incl_all_inpts,self.n_tokens),
-        #    device=DEVICES[src.get_device()]
-        #)
-        #logits[:,:S-1+incl_all_inpts].scatter_(
-        #    dim=-1,
-        #    index=src[:, 1-incl_all_inpts:S, None],
-        #    src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
-        #)
-
-        #past_key_values = None
-        #inpt = ids[:,:S]
-        #pids = pos_ids[:,:S]
-        #mask = pad_mask[:,:S]
-        #for step in range(n_loops):
-        #    ret = self.encoder(
-        #        inpt,
-        #        attention_mask=mask,
-        #        position_ids=pids,
-        #        past_key_values=past_key_values,
-        #        use_cache=True,
-        #    )
-        #    past_key_values = ret.past_key_values
-        #    pred = self.decoder(ret.last_hidden_state)[:,-1]
-        #    logits[:,S-1+step+incl_all_inpts] = pred
-        #    argmaxs = self.sample_with_temperature(
-        #        pred, temperature
-        #    ).squeeze()
-        #    ids[:,S+step] = argmaxs
-
-        #    inpt = ids     [:,S+step:S+step+1]
-        #    pids = pos_ids [:,S+step:S+step+1]
-        #    mask = pad_mask[:,:S+step+1]
-        #return {
-        #  "logits": logits, "pred_ids": ids[:,int(not incl_all_inpts):]
-        #}
-
-        ########### TODO DELTEME all rest of function and uncomment above
-        embs = self.embeddings(src)
-        B,S,E = embs.shape
+        assert mask is None
+        B,S = src.shape
         n_loops = n_steps + 1
 
-        pad_mask = torch.nn.functional.pad(
-            ~pad_mask.bool(), (0, n_loops), value=False
-        )
         ids = torch.nn.functional.pad(
-            src, (0, n_loops), value=0
+            src, (0,n_loops), value=0
         )
-        embs = torch.nn.functional.pad(
-            embs, (0,0,0,n_loops), value=0
+        pad_mask = torch.nn.functional.pad(
+            ~pad_mask.bool(), (0, n_loops), value=True
+        )
+        pos_ids = get_pos_ids(
+            pad_mask, arange=self.arange, pad_pos_skip=self.pad_pos_skip
         )
         logits = torch.zeros(
             (B,S+n_steps+incl_all_inpts,self.n_tokens),
-            device=DEVICES[embs.get_device()]
+            device=DEVICES[src.get_device()]
         )
         logits[:,:S-1+incl_all_inpts].scatter_(
             dim=-1,
             index=src[:, 1-incl_all_inpts:S, None],
             src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
         )
-        if mask is None:
-            mask = generate_square_subsequent_mask(
-                embs.shape[1]
-            ).to(DEVICES[self.get_device()])
-        elif is_causal:
-            temp = generate_square_subsequent_mask(embs.shape[1])
-            mask = temp|mask
-            mask = mask.to(DEVICES[self.get_device()])
 
+        past_key_values = None
+        inpt = ids[:,:S]
+        pids = pos_ids[:,:S]
+        mask = pad_mask[:,:S]
         for step in range(n_loops):
-            temp = self.pos_encoder(
-                embs[:,:S+step], mask=pad_mask[:,:S+step]
+
+            ########## DELETE AND UNCOMMENT BELOW
+            embs = self.embeddings(ids[:,:S+step])
+            embs = self.pos_encoder(
+                embs, mask=pad_mask[:,:S+step]
             )
-            output = self.encoder(
-                inputs_embeds=temp,
-                attention_mask=pad_mask[:,:S+step],
+            ret = self.encoder(
+                inputs_embeds=embs[:,S+step-1:],
+                attention_mask=mask,
+                position_ids=pids,
+                past_key_values=past_key_values,
+                use_cache=True,
             )
-            pred = self.decoder(output.last_hidden_state[:,-1])
+
+            ##########
+
+            #ret = self.encoder(
+            #    inpt,
+            #    attention_mask=mask,
+            #    position_ids=pids,
+            #    past_key_values=past_key_values,
+            #    use_cache=True,
+            #)
+            past_key_values = ret.past_key_values
+            pred = self.decoder(ret.last_hidden_state)[:,-1]
             logits[:,S-1+step+incl_all_inpts] = pred
             argmaxs = self.sample_with_temperature(
                 pred, temperature
             ).squeeze()
             ids[:,S+step] = argmaxs
-            embs[:,S+step] = self.embeddings(argmaxs)
-        #    ret = self.encoder(
-        #        inpt,
-        #        attention_mask=mask,
-        #        position_ids=pids,
-        #        past_key_values=past_key_values,
-        #        use_cache=True,
-        #    )
-        #    past_key_values = ret.past_key_values
-        #    pred = self.decoder(ret.last_hidden_state)[:,-1]
-        #    logits[:,S-1+step+incl_all_inpts] = pred
-        #    argmaxs = self.sample_with_temperature(
-        #        pred, temperature
-        #    ).squeeze()
-        #    ids[:,S+step] = argmaxs
 
-        #    inpt = ids     [:,S+step:S+step+1]
-        #    pids = pos_ids [:,S+step:S+step+1]
-        #    mask = pad_mask[:,:S+step+1]
+            inpt = ids     [:,S+step:S+step+1]
+            pids = pos_ids [:,S+step:S+step+1]
+            mask = pad_mask[:,:S+step+1]
         return {
-            "logits": logits, "pred_ids": ids[:,int(not incl_all_inpts):]
+          "logits": logits, "pred_ids": ids[:,int(not incl_all_inpts):]
         }
 
 class FrankenBTokModel(FrankenModel):
@@ -1635,38 +1581,39 @@ if __name__=="__main__":
     idxs[2:,1:-1:2] = sep_idx
     print("Idxs:", idxs)
 
-    blotches = torch.ones(len(idxs))*torch.FloatTensor([
-        0.1, 0.3, 0.6, 0.9
-    ])
-    n_seps = torch.max(torch.sum(idxs==sep_idx, dim=1))
-    for i in range(n_seps):
+    blotches = torch.FloatTensor([ 0.1, 0.3, 0.6, 0.9 ])
+    print("Blotch Ps:", blotches)
+    bmask = get_blotch_mask(
+        idxs,
+        sep_idx=sep_idx,
+        blotch_p=blotches,
+        #allow_contig=allow_contig,
+        #step_idx = i
+    )
+    for row in range(idxs.shape[0]):
+        print()
+        print("Unblotched:", idxs[row])
+        print("Mask:", bmask[row])
+        print("Blotched:", idxs[row][~bmask[row]])
+    print("bmask p:", bmask.float().sum()/2/(idxs==sep_idx).float().sum())
+
+    hist = {i: [] for i in range(len(blotches))}
+    seps = (idxs==sep_idx).float()
+    for i in range(1000):
         bmask = get_blotch_mask(
             idxs,
             sep_idx=sep_idx,
             blotch_p=blotches,
-            #allow_contig=allow_contig,
-            #step_idx = i
+            allow_contig=allow_contig
         )
-        print("blotch:", idxs[bmask])
-    #for row in range(idxs.shape[0]):
-    #    print()
-    #    print("Unblotched:", idxs[row])
-    #    print("Mask:", bmask[row])
-    #    print("Blotched:", idxs[row][~bmask[row]])
-    #print("bmask p:", bmask.float().sum()/2/(idxs==sep_idx).float().sum())
-
-    #idxs = torch.randint(2,9, size=(n_samples,slen))
-    #idxs[:2,:-1:2] = sep_idx
-    #idxs[2:,1:-1:2] = sep_idx
-
-    #blotches = torch.ones(len(idxs))*blotch_p
-    #bmask = get_blotch_mask(
-    #    idxs,
-    #    sep_idx=sep_idx,
-    #    blotch_p=blotches,
-    #    allow_contig=allow_contig
-    #)
-    #print("bmask p:", bmask.float().sum()/2/(idxs==sep_idx).float().sum())
+        ps = bmask.float()
+        mult = (seps*ps)
+        ps = (mult.sum(-1))/(seps.sum(-1)-1)
+        for j in range(len(hist)):
+            hist[j].append(ps[j].item())
+    print("Distrs")
+    for j in range(len(hist)):
+        print("OG:", blotches[j], "--", np.mean(hist[j]))
 
 
 

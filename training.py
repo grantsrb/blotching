@@ -327,12 +327,14 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 if nloops is None: nloops = len(iterable)
                 nloops = min(nloops, len(iterable))
                 blotch_ps = [0]
-                if model.n_btokens==0:
-                    blotch_ps = [0.0]
-                #elif hyps["exp_name"]=="test": blotch_ps = [0]
-                else:
-                    blotch_ps = np.arange(0,model.n_btokens,3)
-                    blotch_ps = blotch_ps/model.bp_gran
+                blotch_ps = [0.0]
+                # DELETEMe
+                #if model.n_btokens==0:
+                #    blotch_ps = [0.0]
+                ##elif hyps["exp_name"]=="test": blotch_ps = [0]
+                #else:
+                #    blotch_ps = np.arange(0,model.n_btokens,3)
+                #    blotch_ps = blotch_ps/model.bp_gran
                 for bp in blotch_ps:
                     print("\nBlotch P:", bp)
                     avg_loss = 0
