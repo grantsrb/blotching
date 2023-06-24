@@ -631,7 +631,7 @@ class FrankenModel(Model):
             wpe.weight.data[:] = pe.pe.data[:len(wpe.weight.data)]
 
             ######### TODO DELETEME
-            wpe.weight.data[:] = 1
+            wpe.weight.data[:] = torch.ones_like(wpe.weight.data)
             self.pos_encoder = globals()[self.posenc_type](
                 d_model=self.d_model,
                 posenc_drop_p=self.posenc_drop_p,
@@ -751,8 +751,9 @@ class FrankenModel(Model):
             embs = self.pos_encoder(
                 embs, mask=pad_mask[:,:S+step]
             )
+            if step>0: embs = embs[:,S+step-1:]
             ret = self.encoder(
-                inputs_embeds=embs[:,S+step-1:],
+                inputs_embeds=embs,
                 attention_mask=mask,
                 position_ids=pids,
                 past_key_values=past_key_values,
