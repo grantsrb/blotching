@@ -11,6 +11,8 @@ from transformers import (
     CONFIG_MAPPING,
     GPT2Config,
     AutoModelForCausalLM,
+    OpenAIGPTConfig,
+    GPTJConfig,
 )
 
 DEVICES = {
@@ -37,6 +39,8 @@ class Model(torch.nn.Module):
                        pad_pos_skip:bool=False,
                        sep_idx:int=None,
                        actv_fxn:str="relu",
+                       hf_model_type:str="gpt2",
+                       scale_attn_weights:bool=True,
                        *args, **kwargs):
         """
         n_tokens: int
@@ -97,6 +101,11 @@ class Model(torch.nn.Module):
             the id of the sep token
         actv_fxn: str
             the transformer activation function
+        hf_model_type: str
+            the huggingface transformer base. only applies if using
+            HFModel types. Specifies the hf model base type.
+        scale_attn_weights: bool
+            scale attention weights by dividing by sqrt(hidden_size)
         """
         super().__init__()
         self.n_tokens = n_tokens
@@ -132,6 +141,8 @@ class Model(torch.nn.Module):
         self.pad_pos_skip = pad_pos_skip
         self.sep_idx = sep_idx
         self.actv_fxn = actv_fxn
+        self.hf_model_type = hf_model_type
+        self.scale_attn_weights = scale_attn_weights
 
     #def get_distr_fxn(self, distr):
     #    """
@@ -288,20 +299,19 @@ class Model(torch.nn.Module):
             )
         return ret_dict
 
-
-class HFModel(Model):
-    """
-    Uses a huggingface model base for the transformer.
-    """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.model_type = 'TransformerModel'
+    def get_config(self):
+        """
+        Finds the appropirate configuration when using Huggingface
+        models.
+        """
         d_hid = self.h_mult*self.d_model
         config_kwargs = {
             "vocab_size": self.n_tokens+self.n_btokens,
             "hidden_size": self.d_model,
             "num_hidden_layers": self.n_layers,
             "num_attention_heads": self.n_heads,
+            "n_positions": self.max_posencs,
+            "rotary_dim": self.d_model//self.n_heads,
             "n_ctx": self.max_posencs,
             "n_embd": self.d_model,
             "n_head": self.n_heads,
@@ -310,27 +320,44 @@ class HFModel(Model):
             "resid_pdrop": self.drop_p,
             "embd_pdrop": 0,
             "attn_pdrop": self.drop_p,
-            "scale_attn_weights": True,
+            "scale_attn_weights": self.scale_attn_weights,
             "scale_attn_by_inverse_layer_idx": False,
             "tie_word_embeddings": False,
             "torch_dtype": "float32",
         }
-        config = GPT2Config()
+        if self.hf_model_type=="gpt2":
+            config = GPT2Config()
+        elif self.hf_model_type == "gptj":
+            config_kwargs["activation_function"] = self.actv_fxn
+            config = GPTJConfig()
         config.update(config_kwargs)
-        self.encoder = AutoModelForCausalLM.from_config(config)
-        wpe = self.encoder.transformer.wpe
-        for name, p in wpe.named_parameters():
-            print("Turning off gradients for", name)
-            p.requires_grad = self.learn_posencs
-        pe = globals()[self.posenc_type](
-            d_model=self.d_model,
-            max_len=len(wpe.weight.data),
-            learnable=self.learn_posencs,
-            pad_pos_skip=self.pad_pos_skip
-        )
-        wpe.weight.data[:] = pe.pe.data[:len(wpe.weight.data)]
+        return config
 
-        self.embeddings = self.encoder.get_input_embeddings()
+# Probably deprecated
+class HFModel(Model):
+    """
+    Uses a huggingface model base for the transformer.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'TransformerModel'
+        config = self.get_config()
+        self.encoder = AutoModelForCausalLM.from_config(config)
+        print(self.encoder)
+        if hasattr(self.encoder.transformer, "wpe"):
+            wpe = self.encoder.transformer.wpe
+            for name, p in wpe.named_parameters():
+                print("Turning off gradients for", name)
+                p.requires_grad = self.learn_posencs
+            pe = globals()[self.posenc_type](
+                d_model=self.d_model,
+                max_len=len(wpe.weight.data),
+                learnable=self.learn_posencs,
+                pad_pos_skip=self.pad_pos_skip
+            )
+            wpe.weight.data[:] = pe.pe.data[:len(wpe.weight.data)]
+
+        self.embeddings = self.encoder.transformer.get_input_embeddings()
         self.decoder = nn.Linear( self.d_model, self.n_tokens )
         self.encoder.lm_head = self.decoder
 
@@ -450,7 +477,7 @@ class HFModel(Model):
           "logits": logits, "pred_ids": ids[:,int(not incl_all_inpts):]
         }
 
-
+# Probably deprecated
 class HFBlotchTokenModel(HFModel):
     """
     This model type includes a special token type indicating the
@@ -581,6 +608,351 @@ class HFBlotchTokenModel(HFModel):
                 ret_dict["logits"] = ret_dict["logits"][:,1:]
                 ret_dict["pred_ids"] = ret_dict["pred_ids"][:,1:]
         return ret_dict
+
+class FrankenModel(Model):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'Transformer'
+        d_hid = self.h_mult*self.d_model
+        config = self.get_config()
+        hf_trans = AutoModelForCausalLM.from_config(config)
+        self.encoder = hf_trans.transformer
+
+        if hasattr(self.encoder, "wpe"):
+            wpe = self.encoder.wpe
+            for name, p in wpe.named_parameters():
+                print("Turning off gradients for", name)
+                p.requires_grad = self.learn_posencs
+            pe = globals()[self.posenc_type](
+                d_model=self.d_model,
+                max_len=len(wpe.weight.data),
+                learnable=self.learn_posencs,
+                pad_pos_skip=self.pad_pos_skip
+            )
+            wpe.weight.data[:] = pe.pe.data[:len(wpe.weight.data)]
+
+            ######### TODO DELETEME
+            wpe.weight.data[:] = 0
+            self.pos_encoder = globals()[self.posenc_type](
+                d_model=self.d_model,
+                posenc_drop_p=self.posenc_drop_p,
+                drop_p=self.drop_p,
+                max_len=self.max_posencs,
+                learnable=self.learn_posencs,
+                pad_pos_skip=self.pad_pos_skip
+            )
+
+        self.embeddings = self.encoder.get_input_embeddings()
+        self.decoder = nn.Linear( self.d_model, self.n_tokens )
+
+        self.init_weights()
+
+        self.register_buffer(
+            "arange", torch.arange(self.max_posencs)
+        )
+
+    def tforce_fwd(self, src:torch.Tensor,
+                      mask:torch.Tensor=None,
+                      pad_mask:torch.Tensor=None,
+                      *args, **kwargs):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Tensor, shape ``[seq_len, seq_len]``
+                currently unused in this model type
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
+        Returns:
+            output Tensor of shape ``[bsize, seq_len, n_tokens]``
+        """
+        assert mask is None
+        pmask = ~pad_mask.bool()
+        pos_ids = get_pos_ids(
+            pmask, arange=self.arange, pad_pos_skip=self.pad_pos_skip
+        )
+        output = self.encoder(
+            input_ids=src,
+            attention_mask=pmask,
+            position_ids=pos_ids,
+        )
+        logits = self.decoder(output.last_hidden_state)
+        return {
+            "logits": logits, "pred_ids": logits.argmax(-1)
+        }
+
+    def freedom_fwd(self, src:torch.Tensor,
+                      mask:torch.Tensor=None,
+                      pad_mask:torch.Tensor=None,
+                      is_causal:bool=None,
+                      n_steps:int=10,
+                      incl_all_inpts:bool=False,
+                      pad_pos_skip:bool=False,
+                      temperature=None,
+                      *args, **kwargs):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Tensor, shape ``[seq_len, seq_len]``
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            is_causal: bool
+                If specified, applies a causal mask as mask (optional)
+                and ignores attn_mask for computing scaled dot product
+                attention.
+            n_steps: int
+                the number of prediction steps if not using teacher
+                forcing
+            incl_all_inpts: bool
+                if true, will include all input tokens in the output
+                prediction tensor. otherwise only includes "predicted
+                spaces". "predicted spaces" includes the shifted initial
+                inputs.  This is useful to save a concatenation during
+                the data bootstrapping phase.
+            pad_pos_skip: bool
+                if true, will skip over masked tokens when applying
+                positional encodings based on the pad mask. True values
+                in the mask will be skipped.
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
+        Returns:
+            output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
+        """
+        #assert mask is None
+        #B,S = src.shape
+        #n_loops = n_steps + 1
+
+        #ids = torch.nn.functional.pad(
+        #    src, (0,n_loops), value=0
+        #)
+        #pad_mask = torch.nn.functional.pad(
+        #    ~pad_mask.bool(), (0, n_loops), value=True
+        #)
+        #pos_ids = get_pos_ids(
+        #    pad_mask, arange=self.arange, pad_pos_skip=self.pad_pos_skip
+        #)
+        #logits = torch.zeros(
+        #    (B,S+n_steps+incl_all_inpts,self.n_tokens),
+        #    device=DEVICES[src.get_device()]
+        #)
+        #logits[:,:S-1+incl_all_inpts].scatter_(
+        #    dim=-1,
+        #    index=src[:, 1-incl_all_inpts:S, None],
+        #    src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
+        #)
+
+        #past_key_values = None
+        #inpt = ids[:,:S]
+        #pids = pos_ids[:,:S]
+        #mask = pad_mask[:,:S]
+        #for step in range(n_loops):
+        #    ret = self.encoder(
+        #        inpt,
+        #        attention_mask=mask,
+        #        position_ids=pids,
+        #        past_key_values=past_key_values,
+        #        use_cache=True,
+        #    )
+        #    past_key_values = ret.past_key_values
+        #    pred = self.decoder(ret.last_hidden_state)[:,-1]
+        #    logits[:,S-1+step+incl_all_inpts] = pred
+        #    argmaxs = self.sample_with_temperature(
+        #        pred, temperature
+        #    ).squeeze()
+        #    ids[:,S+step] = argmaxs
+
+        #    inpt = ids     [:,S+step:S+step+1]
+        #    pids = pos_ids [:,S+step:S+step+1]
+        #    mask = pad_mask[:,:S+step+1]
+        #return {
+        #  "logits": logits, "pred_ids": ids[:,int(not incl_all_inpts):]
+        #}
+
+        ########### TODO DELTEME all rest of function and uncomment above
+        embs = self.embeddings(src)
+        B,S,E = embs.shape
+        n_loops = n_steps + 1
+
+        pad_mask = torch.nn.functional.pad(
+            ~pad_mask.bool(), (0, n_loops), value=False
+        )
+        ids = torch.nn.functional.pad(
+            src, (0, n_loops), value=0
+        )
+        embs = torch.nn.functional.pad(
+            embs, (0,0,0,n_loops), value=0
+        )
+        logits = torch.zeros(
+            (B,S+n_steps+incl_all_inpts,self.n_tokens),
+            device=DEVICES[embs.get_device()]
+        )
+        logits[:,:S-1+incl_all_inpts].scatter_(
+            dim=-1,
+            index=src[:, 1-incl_all_inpts:S, None],
+            src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
+        )
+        if mask is None:
+            mask = generate_square_subsequent_mask(
+                embs.shape[1]
+            ).to(DEVICES[self.get_device()])
+        elif is_causal:
+            temp = generate_square_subsequent_mask(embs.shape[1])
+            mask = temp|mask
+            mask = mask.to(DEVICES[self.get_device()])
+
+        for step in range(n_loops):
+            temp = self.pos_encoder(
+                embs[:,:S+step], mask=pad_mask[:,:S+step]
+            )
+            output = self.encoder(
+                inputs_embeds=temp,
+                attention_mask=pad_mask[:,:S+step],
+            )
+            pred = self.decoder(output.last_hidden_state[:,-1])
+            logits[:,S-1+step+incl_all_inpts] = pred
+            argmaxs = self.sample_with_temperature(
+                pred, temperature
+            ).squeeze()
+            ids[:,S+step] = argmaxs
+            embs[:,S+step] = self.embeddings(argmaxs)
+        #    ret = self.encoder(
+        #        inpt,
+        #        attention_mask=mask,
+        #        position_ids=pids,
+        #        past_key_values=past_key_values,
+        #        use_cache=True,
+        #    )
+        #    past_key_values = ret.past_key_values
+        #    pred = self.decoder(ret.last_hidden_state)[:,-1]
+        #    logits[:,S-1+step+incl_all_inpts] = pred
+        #    argmaxs = self.sample_with_temperature(
+        #        pred, temperature
+        #    ).squeeze()
+        #    ids[:,S+step] = argmaxs
+
+        #    inpt = ids     [:,S+step:S+step+1]
+        #    pids = pos_ids [:,S+step:S+step+1]
+        #    mask = pad_mask[:,:S+step+1]
+        return {
+            "logits": logits, "pred_ids": ids[:,int(not incl_all_inpts):]
+        }
+
+class FrankenBTokModel(FrankenModel):
+    """
+    This model type includes a special token type indicating the
+    blotch_p quantity. The token type is handled automatically by
+    the forward function. Simply argue the appropriate blotch_p in the
+    forward function. Generally speaking, the blotch_p will be rounded
+    to the nearest 0.1, and you cannot exceed the blotch_p_max value
+    set at the start.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'Blotch'
+        self.boffset = self.n_tokens
+
+    def forward(self, src:torch.Tensor,
+                      mask:torch.Tensor=None,
+                      pad_mask:torch.Tensor=None,
+                      is_causal:bool=None,
+                      tforce:bool=True,
+                      n_steps:int=10,
+                      temperature=None,
+                      incl_all_inpts=False,
+                      blotch_p=None,
+                      *args, **kwargs):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Bool Tensor, shape ``[seq_len, seq_len]``
+            pad_mask: Bool Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            is_causal: bool
+                If specified, applies a causal mask as mask (optional)
+                and ignores attn_mask for computing scaled dot product
+                attention.
+            tforce: bool
+                determines whether or not to teacherforce
+            n_steps: int
+                the number of prediction steps if not using teacher
+                forcing
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
+            incl_all_inpts: bool
+                if true, will include all input tokens in the output
+                prediction tensor. otherwise only includes "predicted
+                spaces". Only applies if using freedom fwd. This is
+                useful to save a concatenation during the data
+                bootstrapping phase.
+            pad_pos_skip: bool
+                if true, will skip over tokens when applying positional
+                encodings based on the pad mask.
+            blotch_p: float
+                the amount of blotching to use. If None is argued, the
+                blotching is sampled from bp_min to bp_max
+                member variables.
+        Returns:
+            if tforce:
+              output Tensor of shape ``[bsize, seq_len, boffset]``
+            else:
+              output Tensor of shape ``[bsize,seq_len+n_steps,boffset]``
+        """
+        # Get appropriate blotch ids
+        if blotch_p is None: blotch_p = torch.rand(len(src))*self.bp_max
+        blotch_ids, blotch_p = self.get_blotch_ids(blotch_p)
+        if len(blotch_ids)!=len(src):
+            blotch_ids = torch.full((len(src),), blotch_ids.item())
+            blotch_p = torch.full((len(src),), blotch_p.item())
+        blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
+
+
+        if tforce:
+            blotch_mask = get_blotch_mask(
+                src,
+                sep_idx=self.sep_idx,
+                blotch_p=blotch_p,
+            )
+            device = DEVICES[pad_mask.get_device()]
+            pad_mask = pad_mask|blotch_mask.to(device)
+            pad_mask = torch.nn.functional.pad(
+                pad_mask, (1, 0), value=False
+            )
+            src = torch.cat([blotch_ids[...,None], src], dim=-1)
+
+            ret_dict = self.tforce_fwd(
+                src=src,
+                mask=mask,
+                pad_mask=pad_mask,
+                is_causal=is_causal,
+                *args, **kwargs
+            )
+            ret_dict["blotch_mask"] = blotch_mask
+            # Remove the blotch token
+            ret_dict["logits"] = ret_dict["logits"][:,1:]
+            ret_dict["pred_ids"] = ret_dict["pred_ids"][:,1:]
+        else:
+            src = torch.cat([blotch_ids[...,None], src], dim=-1)
+            pad_mask = torch.nn.functional.pad(
+                pad_mask, (1, 0), value=False
+            )
+            ret_dict = self.freedom_fwd(
+                src=src,
+                mask=mask,
+                pad_mask=pad_mask,
+                is_causal=is_causal,
+                n_steps=n_steps,
+                incl_all_inpts=False,
+                temperature=temperature,
+                *args, **kwargs
+            )
+            # Don't need to remove blotch token because freedom_fwd
+            # always does it for us.
+            if not incl_all_inpts:
+                ret_dict["logits"] = ret_dict["logits"][:,1:]
+                ret_dict["pred_ids"] = ret_dict["pred_ids"][:,1:]
+        return ret_dict
+
 
 class TransformerModel(Model):
     def __init__(self, *args, **kwargs):
@@ -1271,9 +1643,9 @@ if __name__=="__main__":
         bmask = get_blotch_mask(
             idxs,
             sep_idx=sep_idx,
-            #blotch_p=blotches,
-            allow_contig=allow_contig,
-            step_idx = i
+            blotch_p=blotches,
+            #allow_contig=allow_contig,
+            #step_idx = i
         )
         print("blotch:", idxs[bmask])
     #for row in range(idxs.shape[0]):

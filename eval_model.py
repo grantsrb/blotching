@@ -54,12 +54,12 @@ if __name__=="__main__":
     rank = 0 # Ignore this. Rank if using parallel processing
     verbose = True
     bsize = 1000 # Determines batch size of evaluation
-    overwrite = False
+    overwrite = True
     testing = False
     max_num = None # override the max_num given by the hyps.
     # Integer argument if you want to randomly sample n problems rather
     # than systematically looking at all possible problems.
-    rand_samps = 5000
+    rand_samps = 1000
     use_val_file = False # uses validation data from training
 
     if testing: print("CURRENTLY IN TESTING MODE!!!!")
@@ -117,7 +117,11 @@ if __name__=="__main__":
         # Make Tokenizer
         tokenizer = datas.Tokenizer.get_tokenizer(**hyps)
 
-        model = io.load_model(checkpt, globals())
+        try:
+            model = io.load_model(checkpt, globals())
+        except:
+            print("failed to load model. skipping....")
+            continue
         model.eval()
         model.cuda()
 
@@ -173,10 +177,11 @@ if __name__=="__main__":
         plen = data_cache.prob_len
         if verbose and rank==0: print("Evaluating Model")
         n_loops = len(iter(data_cache))
-        if hyps["model_type"] in {"TransformerModel", "HFModel"}:
+        if model.model_type=="Transformer":
             bps = [0.0]
         else:
-            bps = np.arange(max(model.n_btokens,1))/(model.bp_gran-1)
+            bps = np.arange(model.n_btokens)
+            bps = bps/model.bp_gran
         for blotch_p in bps:
             print("\nBp:", blotch_p)
             for i,data in enumerate(data_cache):

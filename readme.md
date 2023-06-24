@@ -210,6 +210,9 @@ then running the following command:
 
     "model_type": str
         the class name of the model architecture
+    "hf_model_type": str ["gpt2", "gptj"]
+        the huggingface transformer base. only applies if using
+        HFModel or FrankenModel types.
     "digit_embs": bool
         if true, all numbers consist of individual digit embeddings.
         false is not currently implemented.

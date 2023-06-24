@@ -130,6 +130,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         print("Using Sequence Length:", hyps["seq_len"])
 
     model = make_model(hyps)
+
     hyps["n_btokens"] = model.n_btokens
     hyps["model_parallel"] = hyps.get("model_parallel", False)
     if not hyps["model_parallel"]: model.to(rank)
@@ -328,7 +329,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 blotch_ps = [0]
                 if model.n_btokens==0:
                     blotch_ps = [0.0]
-                elif hyps["exp_name"]=="test": blotch_ps = [0]
+                #elif hyps["exp_name"]=="test": blotch_ps = [0]
                 else:
                     blotch_ps = np.arange(0,model.n_btokens,3)
                     blotch_ps = blotch_ps/model.bp_gran
@@ -772,10 +773,16 @@ def hyper_error_catching(hyps):
                                 not hyps.get("blotch_p_max", None) and\
                                 hyps["model_type"]=="BlotchTokenModel":
         hyps["model_type"] = "TransformerModel"
+        hyps["n_btokens"] = 0
     elif not hyps.get("blotch_p_min", None) and\
                                 not hyps.get("blotch_p_max", None) and\
                                 hyps["model_type"]=="HFBlotchTokenModel":
         hyps["model_type"] = "HFModel"
+        hyps["n_btokens"] = 0
+    elif not hyps.get("blotch_p_max", None) and\
+                                hyps["model_type"]=="FrankenBTokModel":
+        hyps["model_type"] = "FrankenModel"
+        hyps["n_btokens"] = 0
     if "init_data" in hyps:
         print("assuming init_data was meant to be init_samples")
         hyps["init_samples"] = hyps["init_data"]
