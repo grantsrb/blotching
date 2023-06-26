@@ -123,10 +123,10 @@ class Model(torch.nn.Module):
                 # Add 1 to include both 0 and max
                 self.n_btokens = max(int(self.bp_max*self.bp_gran)+1, 2)
             elif self.n_btokens:
-                self.bp_gran = (self.n_btokens-1)/self.bp_max
+                self.bp_gran = (self.n_btokens)/self.bp_max
             else:
                 self.n_btokens = 11
-                self.bp_gran = (self.n_btokens-1)/self.bp_max
+                self.bp_gran = (self.n_btokens)/self.bp_max
             print("Num Blotch Tokens:", self.n_btokens)
             print(
                 "Possible Bps:",
@@ -180,7 +180,7 @@ class Model(torch.nn.Module):
     def get_device(self):
         return next(self.parameters()).get_device()
 
-    def get_blotch_ids(self, blotch_ps, eps=0.001):
+    def get_blotch_ids(self, blotch_ps):
         """
         This function takes a float or tensor of blotch probabilities
         and converts it into an id tensor corresponding to the blotch
@@ -189,17 +189,13 @@ class Model(torch.nn.Module):
 
         Args:
             blotch_ps: float or FloatTensor (N,)
-            eps: float
-                a small value to avoid improper integer arithmetic.
-                this value is added to the blotch_p x gran product
-                to ensure the value surpasses the apprpriate threshold
         Returns:
             blotch_ids: LongTensor (N,)
         """
         if type(blotch_ps)!=type(torch.Tensor()):
             blotch_ps = torch.full((1,), blotch_ps)
         blotch_ids = torch.clamp(
-            blotch_ps*self.bp_gran+eps, min=0, max=self.n_btokens-1
+            blotch_ps*self.bp_gran, min=0, max=self.n_btokens-1
         ).long()
         blotch_ps = blotch_ids.float()/self.bp_gran
         return blotch_ids.long() + self.boffset, blotch_ps
@@ -550,26 +546,26 @@ class HFBlotchModel(HFModel):
             blotch_p = torch.full((len(src),), blotch_p.item())
         blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
 
-        # TODO DELETME
-        n_loops = 10000
-        ids = [i for i in range(self.n_btokens)]
+        ## TODO DELETME
+        #n_loops = 10000
+        #ids = [i for i in range(self.n_btokens)]
 
-        hist = {i: 0 for i in set(ids)}
-        for _ in range(n_loops):
-            blotch_p = torch.rand(len(src))*self.bp_max
-            blotch_ids, blotch_p = self.get_blotch_ids(blotch_p)
-            if len(blotch_ids)!=len(src):
-                blotch_ids = torch.full((len(src),), blotch_ids.item())
-                blotch_p = torch.full((len(src),), blotch_p.item())
-            blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
-            ids = blotch_ids.cpu().numpy()-self.boffset
-            bp = blotch_p.cpu().numpy()
-            for i in set(ids):
-                hist[i] += (ids==i).mean()
-        keys = sorted(list(hist.keys()))
-        for k in keys:
-            print(k, hist[k]/n_loops)
-        print()
+        #hist = {i: 0 for i in set(ids)}
+        #for _ in range(n_loops):
+        #    blotch_p = torch.rand(len(src))*self.bp_max
+        #    blotch_ids, blotch_p = self.get_blotch_ids(blotch_p)
+        #    if len(blotch_ids)!=len(src):
+        #        blotch_ids = torch.full((len(src),), blotch_ids.item())
+        #        blotch_p = torch.full((len(src),), blotch_p.item())
+        #    blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
+        #    ids = blotch_ids.cpu().numpy()-self.boffset
+        #    bp = blotch_p.cpu().numpy()
+        #    for i in set(ids):
+        #        hist[i] += (ids==i).mean()
+        #keys = sorted(list(hist.keys()))
+        #for k in keys:
+        #    print(k, hist[k]/n_loops)
+        #print()
 
 
         if tforce:
@@ -850,26 +846,26 @@ class BlotchTokenModel(TransformerModel):
             blotch_p = torch.full((len(src),), blotch_p.item())
         blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
 
-        # TODO DELETME
-        n_loops = 10000
-        ids = [i for i in range(self.n_btokens)]
+        ## TODO DELETME
+        #n_loops = 10000
+        #ids = [i for i in range(self.n_btokens)]
 
-        hist = {i: 0 for i in set(ids)}
-        for _ in range(n_loops):
-            blotch_p = torch.rand(len(src))*self.bp_max
-            blotch_ids, blotch_p = self.get_blotch_ids(blotch_p)
-            if len(blotch_ids)!=len(src):
-                blotch_ids = torch.full((len(src),), blotch_ids.item())
-                blotch_p = torch.full((len(src),), blotch_p.item())
-            blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
-            ids = blotch_ids.cpu().numpy()-self.boffset
-            bp = blotch_p.cpu().numpy()
-            for i in set(ids):
-                hist[i] += (ids==i).mean()
-        keys = sorted(list(hist.keys()))
-        for k in keys:
-            print(k, hist[k]/n_loops)
-        print()
+        #hist = {i: 0 for i in set(ids)}
+        #for _ in range(n_loops):
+        #    blotch_p = torch.rand(len(src))*self.bp_max
+        #    blotch_ids, blotch_p = self.get_blotch_ids(blotch_p)
+        #    if len(blotch_ids)!=len(src):
+        #        blotch_ids = torch.full((len(src),), blotch_ids.item())
+        #        blotch_p = torch.full((len(src),), blotch_p.item())
+        #    blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
+        #    ids = blotch_ids.cpu().numpy()-self.boffset
+        #    bp = blotch_p.cpu().numpy()
+        #    for i in set(ids):
+        #        hist[i] += (ids==i).mean()
+        #keys = sorted(list(hist.keys()))
+        #for k in keys:
+        #    print(k, hist[k]/n_loops)
+        #print()
 
 
         if tforce:

@@ -160,7 +160,7 @@ then running the following command:
         be sampled, the resulting problem has fewer entities.
         A value of 1 means each entity is guaranteed to be
         sampled, a value of 0 is equivalent to setting the
-        max_ents to 2.
+        max_ents to 2. If None is argued, defaults to 0.5
 
     "n_epochs": int
         the total number of training iterations
@@ -183,7 +183,7 @@ then running the following command:
     "blotch_p_min": float
         sets the minimum amount of blotching for a model.
     "blotch_p_max": float
-        sets the maximum amount of blotching for a model.
+        sets the maximum amount of blotching for a model. Not inclusive.
     "n_btokens": int or None
         the number of blotch tokens. This is effectively a
         granularity parameter for blotch values. If None, will
@@ -207,12 +207,15 @@ then running the following command:
     "n_layers": int
         the number of transformer layers or consecutive lstms used in
         the model.
+    "scale_attn_weights": bool
+        if true and using hf type models, will scale the attention weights
+        by 1/sqrt(d) where d is the hidden dimension
 
     "model_type": str
         the class name of the model architecture
-    "hf_model_type": str ["gpt2", "gptj"]
+    "hf_model_type": str ["gpt2", "gptj", "llama"]
         the huggingface transformer base. only applies if using
-        HFModel or FrankenModel types.
+        HFModel types.
     "digit_embs": bool
         if true, all numbers consist of individual digit embeddings.
         false is not currently implemented.
