@@ -112,7 +112,7 @@ class Model(torch.nn.Module):
         self.sep_idx = sep_idx
 
     def get_device(self):
-        return next(self.parameters()).get_device()
+        return DEVICES[next(self.parameters()).get_device()]
 
     def get_blotch_ids(self, blotch_ps):
         """
@@ -440,7 +440,17 @@ class BlotchTokenModel(TransformerModel):
             blotch_range = torch.rand(len(src))
             blotch_ids=(blotch_range*self.n_btokens).long()
             blotch_p = blotch_ids.float()/self.bp_gran
-            #blotch_p = blotch_range*self.bp_diff+self.bp_min
+            #print()
+            ##blotch_p = blotch_range*self.bp_diff+self.bp_min
+            #print("No argued bp")
+            #print("bids:", blotch_ids[:10])
+            #print("bps:", blotch_p[:10])
+            #print("bids unique:", torch.unique(blotch_ids))
+            #print("bps unique:", torch.unique(blotch_p))
+            #print("bid distr:")
+            #hist = {i: (blotch_ids==i).float().mean() for i in range(11)}
+            #for k in hist:
+            #    print(k, "-", hist[k])
             blotch_ids += self.n_tokens
         blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
 

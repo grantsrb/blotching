@@ -17,6 +17,11 @@ RMB = "|<RMB>|" # Extra characters are to ensure uniqueness
 CMP = "|<CMP{}>|"
 SOS = "|<SOS>|"
 
+DEVICES = {
+    -1: "cpu",
+    **{i: i for i in range(10)}
+}
+
 
 def train(rank, hyps, verbose=True, *args, **kwargs):
     # Distributed Set Up
@@ -34,6 +39,11 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     hyps["seed"] = hyps.get("seed", int(time.time()))
     if hyps["seed"] is None: hyps["seed"] = int(time.time())
     torch.manual_seed(hyps["seed"]+rank)
+
+    ######## DELETEME
+    rank = "cpu"
+    ########
+
     hyps["rank"] = rank
 
     # Establish math environment parameters
@@ -129,8 +139,15 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         print("Using Sequence Length:", hyps["seq_len"])
 
     model = make_model(hyps)
+    n_params = 0
+    for p in model.parameters():
+        if hasattr(p, "data"):
+            n_params += p.data.numel()
+    hyps["n_params"] = n_params
+    print("NParameters:", n_params)
     hyps["model_parallel"] = hyps.get("model_parallel", False)
-    if not hyps["model_parallel"]: model.to(rank)
+    if not hyps["model_parallel"]:
+        model.to(rank)
 
     if verbose and rank==0:
         print("Model Type:", type(model))
