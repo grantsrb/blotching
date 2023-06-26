@@ -122,7 +122,11 @@ class Model(torch.nn.Module):
             if self.bp_gran:
                 # Add 1 to include both 0 and max
                 self.n_btokens = max(int(self.bp_max*self.bp_gran)+1, 2)
-            self.bp_gran = (self.n_btokens-1)/self.bp_max
+            elif self.n_btokens:
+                self.bp_gran = (self.n_btokens-1)/self.bp_max
+            else:
+                self.n_btokens = 11
+                self.bp_gran = (self.n_btokens-1)/self.bp_max
             print("Num Blotch Tokens:", self.n_btokens)
             print(
                 "Possible Bps:",
@@ -477,7 +481,7 @@ class HFModel(Model):
         }
 
 # Probably deprecated
-class HFBlotchTokenModel(HFModel):
+class HFBlotchModel(HFModel):
     """
     This model type includes a special token type indicating the
     blotch_p quantity. The token type is handled automatically by
@@ -546,18 +550,27 @@ class HFBlotchTokenModel(HFModel):
             blotch_p = torch.full((len(src),), blotch_p.item())
         blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
 
-        ## TODO DELETME
-        #ids = blotch_ids.cpu().numpy()-self.boffset
-        #bp = blotch_p.cpu().numpy()
-        #print("blotch_p", np.min(bp), np.max(bp))
-        #print("bids", set(ids))
-        #hist = {i:0 for i in set(ids)}
-        #for i in ids: hist[i] += 1
-        #s = sum(list(hist.values()))
-        #keys = sorted(list(hist.keys()))
-        #for k in keys:
-        #    print(k, hist[k]/s)
-        #print()
+        # TODO DELETME
+        n_loops = 10000
+        ids = [i for i in range(self.n_btokens)]
+
+        hist = {i: 0 for i in set(ids)}
+        for _ in range(n_loops):
+            blotch_p = torch.rand(len(src))*self.bp_max
+            blotch_ids, blotch_p = self.get_blotch_ids(blotch_p)
+            if len(blotch_ids)!=len(src):
+                blotch_ids = torch.full((len(src),), blotch_ids.item())
+                blotch_p = torch.full((len(src),), blotch_p.item())
+            blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
+            ids = blotch_ids.cpu().numpy()-self.boffset
+            bp = blotch_p.cpu().numpy()
+            for i in set(ids):
+                hist[i] += (ids==i).mean()
+        keys = sorted(list(hist.keys()))
+        for k in keys:
+            print(k, hist[k]/n_loops)
+        print()
+
 
         if tforce:
             blotch_mask = get_blotch_mask(
@@ -566,7 +579,8 @@ class HFBlotchTokenModel(HFModel):
                 blotch_p=blotch_p,
             )
 
-            pad_mask = pad_mask|blotch_mask.to(DEVICES[pad_mask.get_device()])
+            pad_mask = pad_mask|\
+                       blotch_mask.to(DEVICES[pad_mask.get_device()])
 
             pad_mask = torch.nn.functional.pad(
                 pad_mask, (1, 0), value=False
@@ -600,298 +614,6 @@ class HFBlotchTokenModel(HFModel):
                 incl_all_inpts=False,
                 temperature=temperature,
                 *args, **kwargs,
-            )
-            # Don't need to remove blotch token because freedom_fwd
-            # always does it for us.
-            if not incl_all_inpts:
-                ret_dict["logits"] = ret_dict["logits"][:,1:]
-                ret_dict["pred_ids"] = ret_dict["pred_ids"][:,1:]
-        return ret_dict
-
-class FrankenModel(Model):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.model_type = 'Transformer'
-        d_hid = self.h_mult*self.d_model
-        config = self.get_config()
-        hf_trans = AutoModelForCausalLM.from_config(config)
-        self.encoder = hf_trans.transformer
-
-        if hasattr(self.encoder, "wpe"):
-            wpe = self.encoder.wpe
-            for name, p in wpe.named_parameters():
-                print("Turning off gradients for", name)
-                p.requires_grad = self.learn_posencs
-            pe = globals()[self.posenc_type](
-                d_model=self.d_model,
-                max_len=len(wpe.weight.data),
-                learnable=self.learn_posencs,
-                pad_pos_skip=self.pad_pos_skip
-            )
-            wpe.weight.data[:] = pe.pe.data[:len(wpe.weight.data)]
-
-            ######### TODO DELETEME
-            wpe.weight.data[:] = torch.ones_like(wpe.weight.data)
-            self.pos_encoder = globals()[self.posenc_type](
-                d_model=self.d_model,
-                posenc_drop_p=self.posenc_drop_p,
-                drop_p=self.drop_p,
-                max_len=self.max_posencs,
-                learnable=self.learn_posencs,
-                pad_pos_skip=self.pad_pos_skip
-            )
-
-        self.embeddings = self.encoder.get_input_embeddings()
-        self.decoder = nn.Linear( self.d_model, self.n_tokens )
-
-        self.init_weights()
-
-        self.register_buffer(
-            "arange", torch.arange(self.max_posencs)
-        )
-
-    def tforce_fwd(self, src:torch.Tensor,
-                      mask:torch.Tensor=None,
-                      pad_mask:torch.Tensor=None,
-                      *args, **kwargs):
-        """
-        Arguments:
-            src: Tensor, shape ``[bsize, seq_len]``
-            mask: Tensor, shape ``[seq_len, seq_len]``
-                currently unused in this model type
-            pad_mask: Tensor, shape ``[bsize, seq_len]``
-                true means padding
-        Returns:
-            output Tensor of shape ``[bsize, seq_len, n_tokens]``
-        """
-        assert mask is None
-        pmask = ~pad_mask.bool()
-        pos_ids = get_pos_ids(
-            pmask, arange=self.arange, pad_pos_skip=self.pad_pos_skip
-        )
-        output = self.encoder(
-            input_ids=src,
-            attention_mask=pmask,
-            position_ids=pos_ids,
-        )
-        logits = self.decoder(output.last_hidden_state)
-        return {
-            "logits": logits, "pred_ids": logits.argmax(-1)
-        }
-
-    def freedom_fwd(self, src:torch.Tensor,
-                      mask:torch.Tensor=None,
-                      pad_mask:torch.Tensor=None,
-                      is_causal:bool=None,
-                      n_steps:int=10,
-                      incl_all_inpts:bool=False,
-                      pad_pos_skip:bool=False,
-                      temperature=None,
-                      *args, **kwargs):
-        """
-        Arguments:
-            src: Tensor, shape ``[bsize, seq_len]``
-            mask: Tensor, shape ``[seq_len, seq_len]``
-            pad_mask: Tensor, shape ``[bsize, seq_len]``
-                true means padding
-            is_causal: bool
-                If specified, applies a causal mask as mask (optional)
-                and ignores attn_mask for computing scaled dot product
-                attention.
-            n_steps: int
-                the number of prediction steps if not using teacher
-                forcing
-            incl_all_inpts: bool
-                if true, will include all input tokens in the output
-                prediction tensor. otherwise only includes "predicted
-                spaces". "predicted spaces" includes the shifted initial
-                inputs.  This is useful to save a concatenation during
-                the data bootstrapping phase.
-            pad_pos_skip: bool
-                if true, will skip over masked tokens when applying
-                positional encodings based on the pad mask. True values
-                in the mask will be skipped.
-            temperature: float
-                a parameter to adjust the entropy of the
-                token sampling. high temperature means high entropy
-        Returns:
-            output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
-        """
-        assert mask is None
-        B,S = src.shape
-        n_loops = n_steps + 1
-
-        ids = torch.nn.functional.pad(
-            src, (0,n_loops), value=0
-        )
-        pad_mask = torch.nn.functional.pad(
-            ~pad_mask.bool(), (0, n_loops), value=True
-        )
-        pos_ids = get_pos_ids(
-            pad_mask, arange=self.arange, pad_pos_skip=self.pad_pos_skip
-        )
-        logits = torch.zeros(
-            (B,S+n_steps+incl_all_inpts,self.n_tokens),
-            device=DEVICES[src.get_device()]
-        )
-        logits[:,:S-1+incl_all_inpts].scatter_(
-            dim=-1,
-            index=src[:, 1-incl_all_inpts:S, None],
-            src=torch.ones_like(logits[:, :S-1+incl_all_inpts])
-        )
-
-        past_key_values = None
-        inpt = ids[:,:S]
-        pids = pos_ids[:,:S]
-        mask = pad_mask[:,:S]
-        for step in range(n_loops):
-
-            ########## DELETE AND UNCOMMENT BELOW
-            embs = self.embeddings(ids[:,:S+step])
-            embs = self.pos_encoder(
-                embs, mask=pad_mask[:,:S+step]
-            )
-            if step>0: embs = embs[:,S+step-1:]
-            ret = self.encoder(
-                inputs_embeds=embs,
-                attention_mask=mask,
-                position_ids=pids,
-                past_key_values=past_key_values,
-                use_cache=True,
-            )
-
-            ##########
-
-            #ret = self.encoder(
-            #    inpt,
-            #    attention_mask=mask,
-            #    position_ids=pids,
-            #    past_key_values=past_key_values,
-            #    use_cache=True,
-            #)
-            past_key_values = ret.past_key_values
-            pred = self.decoder(ret.last_hidden_state)[:,-1]
-            logits[:,S-1+step+incl_all_inpts] = pred
-            argmaxs = self.sample_with_temperature(
-                pred, temperature
-            ).squeeze()
-            ids[:,S+step] = argmaxs
-
-            inpt = ids     [:,S+step:S+step+1]
-            pids = pos_ids [:,S+step:S+step+1]
-            mask = pad_mask[:,:S+step+1]
-        return {
-          "logits": logits, "pred_ids": ids[:,int(not incl_all_inpts):]
-        }
-
-class FrankenBTokModel(FrankenModel):
-    """
-    This model type includes a special token type indicating the
-    blotch_p quantity. The token type is handled automatically by
-    the forward function. Simply argue the appropriate blotch_p in the
-    forward function. Generally speaking, the blotch_p will be rounded
-    to the nearest 0.1, and you cannot exceed the blotch_p_max value
-    set at the start.
-    """
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.model_type = 'Blotch'
-        self.boffset = self.n_tokens
-
-    def forward(self, src:torch.Tensor,
-                      mask:torch.Tensor=None,
-                      pad_mask:torch.Tensor=None,
-                      is_causal:bool=None,
-                      tforce:bool=True,
-                      n_steps:int=10,
-                      temperature=None,
-                      incl_all_inpts=False,
-                      blotch_p=None,
-                      *args, **kwargs):
-        """
-        Arguments:
-            src: Tensor, shape ``[bsize, seq_len]``
-            mask: Bool Tensor, shape ``[seq_len, seq_len]``
-            pad_mask: Bool Tensor, shape ``[bsize, seq_len]``
-                true means padding
-            is_causal: bool
-                If specified, applies a causal mask as mask (optional)
-                and ignores attn_mask for computing scaled dot product
-                attention.
-            tforce: bool
-                determines whether or not to teacherforce
-            n_steps: int
-                the number of prediction steps if not using teacher
-                forcing
-            temperature: float
-                a parameter to adjust the entropy of the
-                token sampling. high temperature means high entropy
-            incl_all_inpts: bool
-                if true, will include all input tokens in the output
-                prediction tensor. otherwise only includes "predicted
-                spaces". Only applies if using freedom fwd. This is
-                useful to save a concatenation during the data
-                bootstrapping phase.
-            pad_pos_skip: bool
-                if true, will skip over tokens when applying positional
-                encodings based on the pad mask.
-            blotch_p: float
-                the amount of blotching to use. If None is argued, the
-                blotching is sampled from bp_min to bp_max
-                member variables.
-        Returns:
-            if tforce:
-              output Tensor of shape ``[bsize, seq_len, boffset]``
-            else:
-              output Tensor of shape ``[bsize,seq_len+n_steps,boffset]``
-        """
-        # Get appropriate blotch ids
-        if blotch_p is None: blotch_p = torch.rand(len(src))*self.bp_max
-        blotch_ids, blotch_p = self.get_blotch_ids(blotch_p)
-        if len(blotch_ids)!=len(src):
-            blotch_ids = torch.full((len(src),), blotch_ids.item())
-            blotch_p = torch.full((len(src),), blotch_p.item())
-        blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
-
-
-        if tforce:
-            blotch_mask = get_blotch_mask(
-                src,
-                sep_idx=self.sep_idx,
-                blotch_p=blotch_p,
-            )
-            device = DEVICES[pad_mask.get_device()]
-            pad_mask = pad_mask|blotch_mask.to(device)
-            pad_mask = torch.nn.functional.pad(
-                pad_mask, (1, 0), value=False
-            )
-            src = torch.cat([blotch_ids[...,None], src], dim=-1)
-
-            ret_dict = self.tforce_fwd(
-                src=src,
-                mask=mask,
-                pad_mask=pad_mask,
-                is_causal=is_causal,
-                *args, **kwargs
-            )
-            ret_dict["blotch_mask"] = blotch_mask
-            # Remove the blotch token
-            ret_dict["logits"] = ret_dict["logits"][:,1:]
-            ret_dict["pred_ids"] = ret_dict["pred_ids"][:,1:]
-        else:
-            src = torch.cat([blotch_ids[...,None], src], dim=-1)
-            pad_mask = torch.nn.functional.pad(
-                pad_mask, (1, 0), value=False
-            )
-            ret_dict = self.freedom_fwd(
-                src=src,
-                mask=mask,
-                pad_mask=pad_mask,
-                is_causal=is_causal,
-                n_steps=n_steps,
-                incl_all_inpts=False,
-                temperature=temperature,
-                *args, **kwargs
             )
             # Don't need to remove blotch token because freedom_fwd
             # always does it for us.
@@ -1127,6 +849,27 @@ class BlotchTokenModel(TransformerModel):
             blotch_ids = torch.full((len(src),), blotch_ids.item())
             blotch_p = torch.full((len(src),), blotch_p.item())
         blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
+
+        # TODO DELETME
+        n_loops = 10000
+        ids = [i for i in range(self.n_btokens)]
+
+        hist = {i: 0 for i in set(ids)}
+        for _ in range(n_loops):
+            blotch_p = torch.rand(len(src))*self.bp_max
+            blotch_ids, blotch_p = self.get_blotch_ids(blotch_p)
+            if len(blotch_ids)!=len(src):
+                blotch_ids = torch.full((len(src),), blotch_ids.item())
+                blotch_p = torch.full((len(src),), blotch_p.item())
+            blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
+            ids = blotch_ids.cpu().numpy()-self.boffset
+            bp = blotch_p.cpu().numpy()
+            for i in set(ids):
+                hist[i] += (ids==i).mean()
+        keys = sorted(list(hist.keys()))
+        for k in keys:
+            print(k, hist[k]/n_loops)
+        print()
 
 
         if tforce:

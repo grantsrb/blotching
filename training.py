@@ -130,6 +130,12 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         print("Using Sequence Length:", hyps["seq_len"])
 
     model = make_model(hyps)
+    n_params = 0
+    for p in model.parameters():
+        if hasattr(p, "data"):
+            n_params += p.data.numel()
+    hyps["n_params"] = n_params
+    print("NParameters:", n_params)
 
     hyps["n_btokens"] = model.n_btokens
     hyps["model_parallel"] = hyps.get("model_parallel", False)
@@ -778,7 +784,7 @@ def hyper_error_catching(hyps):
         hyps["n_btokens"] = 0
     elif not hyps.get("blotch_p_min", None) and\
                                 not hyps.get("blotch_p_max", None) and\
-                                hyps["model_type"]=="HFBlotchTokenModel":
+                                hyps["model_type"]=="HFBlotchModel":
         hyps["model_type"] = "HFModel"
         hyps["n_btokens"] = 0
     elif not hyps.get("blotch_p_max", None) and\
