@@ -40,10 +40,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     if hyps["seed"] is None: hyps["seed"] = int(time.time())
     torch.manual_seed(hyps["seed"]+rank)
 
-    ######## DELETEME
-    rank = "cpu"
-    ########
-
     hyps["rank"] = rank
 
     # Establish math environment parameters
@@ -336,12 +332,13 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 nloops = hyps.get("max_val_loops",None)
                 if nloops is None: nloops = len(iterable)
                 nloops = min(nloops, len(iterable))
-                if hyps["model_type"]=="TransformerModel":
-                    blotch_ps = [0.0]
-                elif hyps["exp_name"]=="test": blotch_ps = [0]
-                else:
-                    blotch_ps = np.arange(max(model.n_btokens//2,1))*2
-                    blotch_ps = blotch_ps/model.bp_gran
+                blotch_ps = [0.0]
+                #if hyps["model_type"]=="TransformerModel":
+                #    blotch_ps = [0.0]
+                #elif hyps["exp_name"]=="test": blotch_ps = [0]
+                #else:
+                #    blotch_ps = np.arange(max(model.n_btokens//2,1))*2
+                #    blotch_ps = blotch_ps/model.bp_gran
                 for bp in blotch_ps:
                     print("\nBlotch P:", bp)
                     avg_loss = 0
