@@ -42,9 +42,9 @@ def get_stats(tokenizer, ids, remove_padding=True):
     for i,pred in enumerate(pred_strings):
         if remove_padding: pred = pred.replace(pad, "")
         pred = pred.split(eos)[0]
-        stats["pred"].append(pred)
-        stats["length"].append(len(pred))
         splt = pred.split(sep)
+        stats["pred"].append(sep.join(splt[1:]))
+        stats["length"].append(len(pred))
         stats["resp"].append(splt[-1])
         stats["first"].append(splt[0])
     return stats
@@ -54,13 +54,15 @@ if __name__=="__main__":
     rank = 0
     verbose = True
     bsize = 1000 # Determines batch size of evaluation
-    overwrite = False
+    overwrite = True
     testing = False
     max_num = None # override the max_num given by the hyps.
     # Integer argument if you want to randomly sample n problems rather
     # than systematically looking at all possible problems.
-    rand_samps = 3000
-    use_val_file = False # uses validation data from training
+    n_samples = 2000 # the number of samples. if None, does all
+    use_val_file = False # uses validation data from training. takes
+    # priority over use_train_file
+    use_train_file = False # overwritten by use_val_file
 
     if testing: print("CURRENTLY IN TESTING MODE!!!!")
 
@@ -75,6 +77,10 @@ if __name__=="__main__":
                 )
         elif "overwrite" in arg or "override" in arg:
             overwrite = True
+        elif "train" in arg or "training" in arg:
+            use_train_file = True
+        elif "val" in arg or "validation" in arg:
+            use_val_file = True
         else:
             try:
                 bsize = int(arg)
@@ -82,8 +88,10 @@ if __name__=="__main__":
                 print("Unrecognized arg", arg)
     if overwrite: print("Overwriting!!!")
 
-    if rand_samps:
-        results_file = "rand_results.csv"
+    if use_train_file:
+        results_file = "train_results.csv"
+    elif use_val_file:
+        results_file = "val_results.csv"
     else:
         results_file = "model_results.csv"
 
@@ -93,12 +101,15 @@ if __name__=="__main__":
         if not testing and not overwrite and os.path.exists(csv_path):
             print(csv_path, "already exists, skipping....")
             continue
+        try:
+            checkpt = io.load_checkpoint(model_folder)
+            hyps = checkpt["hyps"]
+        except:
+            continue
         print(
             "Evaluating", model_folder,
             "-- {}/{}".format(f,len(model_folders))
         )
-        checkpt = io.load_checkpoint(model_folder)
-        hyps = checkpt["hyps"]
 
         if "model_string" in hyps:
             hyps["model_type"] = hyps["model_string"]
@@ -127,10 +138,17 @@ if __name__=="__main__":
 
         # Make dataset
         if verbose and rank==0: print("Collecting Data")
+        train_probs_file = os.path.join(model_folder, "train_probs.txt")
+        with open(train_probs_file, "r") as f:
+            train_probs = [p.strip() for p in f.readlines()]
         val_probs_file = os.path.join(model_folder, "val_probs.txt")
         if use_val_file and os.path.exists(val_probs_file):
+            print("Using Validation Data")
             with open(val_probs_file, "r") as f:
                 probs = [p.strip() for p in f.readlines()]
+            if n_samples: 
+                np.random.shuffle(probs)
+                probs = probs[:n_samples]
             data_cache = datas.make_data_cache(
                 probs,
                 tokenizer,
@@ -138,7 +156,20 @@ if __name__=="__main__":
                 batch_size=hyps["val_batch_size"],
                 incl_meta_data=True,
             )
+        elif use_train_file:
+            print("Using Training Data")
+            if n_samples: 
+                np.random.shuffle(train_probs)
+                train_probs = train_probs[:n_samples]
+            data_cache = datas.make_data_cache(
+                train_probs,
+                tokenizer,
+                seq_len=hyps["seq_len"],
+                batch_size=hyps["val_batch_size"],
+                incl_meta_data=True,
+            )
         else:
+            print("Using Sampled Data")
             if max_num: math_env.max_num = max_num
             elif testing: math_env.max_num = 10
             cache_tup = (
@@ -153,7 +184,8 @@ if __name__=="__main__":
                     tokenizer,
                     max_len=hyps["seq_len"],
                     batch_size=hyps["val_batch_size"],
-                    rand_samps=rand_samps
+                    rand_samps=n_samples,
+                    held_out_probs=set(train_probs)
                 )
                 data_caches[cache_tup] = data_cache
         if verbose and rank==0:
