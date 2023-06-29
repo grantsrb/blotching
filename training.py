@@ -59,20 +59,50 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     hyps["pad_idx"] = tokenizer.pad_idx
     hyps["eos_idx"] = tokenizer.eos_idx
 
+    ##################
+    # Make data caches
+    ##################
     # Make dataset
     if hyps["exp_name"]=="test":
         hyps["max_samples"] = 1000
         hyps["pre_epochs"] = 0
     if verbose and rank==0:
         print("Collecting Data")
-    all_problems = datas.get_all_problems(math_env, shuffle=True)
     vbsize = hyps.get("val_batch_size",500)
-    if len(all_problems)<hyps["max_samples"]:
+    # if starting from some other checkpoint, we want to keep the
+    # same training and validation data as before.
+    if hyps.get("init_checkpt", None):
+        temp_hyps = ml_utils.save_io.get_hyps(hyps["init_checkpt"])
+        sf = temp_hyps['save_folder']
+        with open(os.path.join(sf,"train_probs.txt"),"r") as f:
+            train_probs = [p.strip() for p in f.readlines()]
+        with open(os.path.join(sf,"val_probs.txt"),"r") as f:
+            val_probs = [p.strip() for p in f.readlines()]
+        all_problems = train_probs + val_probs
+        val_len = len(val_probs)
+        train_len = len(train_probs)
+    else:
+        # In some cases, we have fewer possible problems than our argued
+        # initial training sample count. So, we first want to collect
+        # all possible problems to make sure that we create an appropriate
+        # data split
+        all_problems = datas.get_all_problems(math_env, shuffle=True)
+        # Will handle dividing all_problems or 
+        val_probs = None
+        train_probs = None
+        val_len = min(int(0.2*len(all_problems)), hyps["val_samples"])
+        train_len = len(all_problems)-val_len
+
+
+    # This is the case where our total number of problems is small
+    if val_probs or len(all_problems)<hyps["max_samples"]:
         if verbose and rank==0:
             print("Using all possible data")
-        val_len = min(int(0.2*len(all_problems)), hyps["val_samples"])
+        # Handle cases where we've already loaded the validation problsms
+        if not val_probs:
+            val_probs = all_problems[:val_len]
         val_cache, val_probs, val_solns = datas.make_data_cache(
-            probs=all_problems[:val_len],
+            probs=val_probs,
             tokenizer=tokenizer,
             solns=None,
             plen=math_env.prob_len,
@@ -83,9 +113,17 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         hyps["seq_len"] = val_cache.seq_len
         hyps["prob_len"] = val_cache.prob_len
         init_samps = hyps.get("init_samples", hyps["max_samples"])
-        end = len(all_problems)
-        if init_samps: end = min(val_len+init_samps, len(all_problems))
-        train_probs = all_problems[val_len:end]
+        # Handle cases where we've already loaded the training problems
+        if not train_probs:
+            end = len(all_problems)
+            if init_samps:
+                end = min(val_len+init_samps, len(all_problems))
+            train_probs = all_problems[val_len:end]
+        else:
+            end = len(train_probs)
+            if init_samps:
+                end = min(init_samps, end)
+            train_probs = train_probs[:end]
         data_cache = datas.make_data_cache(
             probs=train_probs,
             tokenizer=tokenizer,
@@ -94,6 +132,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             slen=hyps["seq_len"],
             batch_size=hyps["batch_size"]
         )
+    # This is the case where we can sample freely because we have lots
+    # of possible problems
     else:
         if verbose and rank==0:
             print("Using sampling process")
