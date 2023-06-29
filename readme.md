@@ -43,10 +43,11 @@ then running the following command:
         the random seed for all stochastic processes
 
     "init_checkpt": str or None
-        optionally start from an existing model checkpoint. this should
-        be the full path to the checkpoint that you would like to use.
-        This will not use the hyperparameters from the argued checkpt,
-        just the model weights.
+        optionally start from an existing model checkpoint. will also
+        load the checkpoint's training and validation data. the arguement
+        should be the full path to the checkpoint that you would like to
+        use.  This will not use the hyperparameters from the argued
+        checkpt, just the model weights and data.
 
     "max_samples": int or null
         the maximum number of data samples in the data cache. if null
