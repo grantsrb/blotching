@@ -215,3 +215,43 @@ def get_blotch_mask(
                     is_contig = True
             else: is_contig = False
     return mask
+
+def get_pos_ids(mask, arange=None, pad_pos_skip=True):
+    """
+    Returns the position ids based off of the true values of the
+    mask. For example:
+
+        Mask:     [0,1,0,1,1,0,0,1]
+        Pos Ids:  [0,0,0,1,2,0,0,3]
+
+    Args:
+        mask: bool tensor (B,S)
+            true means this function will find position id for it.
+        arange: torch long tensor (S,) or longer
+            a torch arange tensor spanning at least the length of the
+            sequence
+        pad_pos_skip: bool
+            if false, will simply return arange
+    Returns:
+        pos_ids: long tensor (B,S)
+    """
+    device = DEVICES[mask.get_device()]
+    if mask is None: return None
+    B,S = mask.shape
+    if arange is None:
+        arange = torch.arange(S).long().to(device)
+    rep = arange[:S][None].repeat((B,1)).long()
+
+    if not pad_pos_skip: return rep
+
+    pos_ids = torch.zeros((B,S), device=device).long()
+    mask_sums = mask.long().sum(-1)
+
+    pos_ids[mask.bool()] = rep[rep<mask_sums[:,None]]
+    return pos_ids
+
+if __name__=="__main__":
+    mask = torch.randint(0,2, (1,300))
+    print("Mask  :", mask.tolist()[0][200:])
+    pos_ids = get_pos_ids(mask, arange=torch.arange(250))
+    print("PosIDs:", pos_ids.tolist()[0][200:])

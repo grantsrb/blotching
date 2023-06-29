@@ -3,9 +3,18 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from utils import get_blotch_mask
+from utils import get_blotch_mask, get_pos_ids
 import ml_utils
 import math
+
+from transformers import (
+    CONFIG_MAPPING,
+    GPT2Config,
+    AutoModelForCausalLM,
+    OpenAIGPTConfig,
+    GPTJConfig,
+    LlamaConfig,
+)
 
 DEVICES = {
     -1: "cpu", **{i:i for i in range(10)}
@@ -29,6 +38,11 @@ class Model(torch.nn.Module):
                        learn_posencs:bool=False,
                        pad_pos_skip:bool=False,
                        sep_idx:int=None,
+                       actv_fxn:str="gelu",
+                       scale_attn_weights:bool=True,
+                       scale_by_inv_layer:bool=True,
+                       reorder_and_upcast:bool=False,
+                       hf_model_type:str="gpt2",
                        *args, **kwargs):
         """
         n_tokens: int
@@ -78,6 +92,18 @@ class Model(torch.nn.Module):
             encodings based on the pad mask.
         sep_idx: int
             the id of the sep token
+        actv_fxn: str
+            the transformer activation function
+        hf_model_type: str
+            the huggingface transformer base. only applies if using
+            HFModel types. Specifies the hf model base type.
+        scale_attn_weights: bool
+            scale attention weights by dividing by sqrt(hidden_size)
+        scale_by_inv_layer: bool
+            scale attention weights by inverse layer index. see
+            huggingface docs for details
+        reorder_and_upcast: bool
+            reorder and upcast attention. see huggingface docs for details
         """
         super().__init__()
         self.n_tokens = n_tokens
@@ -110,6 +136,11 @@ class Model(torch.nn.Module):
         self.learn_posencs = learn_posencs
         self.pad_pos_skip = pad_pos_skip
         self.sep_idx = sep_idx
+        self.actv_fxn = actv_fxn
+        self.hf_model_type = hf_model_type
+        self.scale_attn_weights = scale_attn_weights
+        self.scale_by_inv_layer = scale_by_inv_layer
+        self.reorder_and_upcast = reorder_and_upcast
 
     def get_device(self):
         return DEVICES[next(self.parameters()).get_device()]
@@ -137,36 +168,6 @@ class Model(torch.nn.Module):
         if not temperature: return torch.argmax(logits, dim=-1)
         ps = torch.nn.functional.softmax( logits/temperature, dim=-1 )
         return torch.multinomial(ps, num_samples=1)
-
-
-class TransformerModel(Model):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.model_type = 'Transformer'
-        self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
-        self.pos_encoder = globals()[self.posenc_type](
-            d_model=self.d_model,
-            posenc_drop_p=self.posenc_drop_p,
-            drop_p=self.drop_p,
-            max_len=self.max_posencs,
-            learnable=self.learn_posencs,
-            pad_pos_skip=self.pad_pos_skip
-        )
-        d_hid = self.h_mult*self.d_model
-        encoder_layer = torch.nn.TransformerEncoderLayer(
-            self.d_model,
-            self.n_heads,
-            d_hid,
-            self.drop_p,
-            batch_first=True,
-            norm_first=self.norm_first
-        )
-        self.transformer_encoder = nn.TransformerEncoder(
-            encoder_layer, self.n_layers
-        )
-        self.decoder = nn.Linear(self.d_model, self.n_tokens)
-
-        self.init_weights()
 
     def init_weights(self) -> None:
         initrange = 0.1
@@ -248,6 +249,36 @@ class TransformerModel(Model):
                 temperature=temperature,
             )
         return ret_dict
+
+
+class TransformerModel(Model):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'Transformer'
+        self.embeddings = torch.nn.Embedding(self.n_tokens,self.d_model)
+        self.pos_encoder = globals()[self.posenc_type](
+            d_model=self.d_model,
+            posenc_drop_p=self.posenc_drop_p,
+            drop_p=self.drop_p,
+            max_len=self.max_posencs,
+            learnable=self.learn_posencs,
+            pad_pos_skip=self.pad_pos_skip
+        )
+        d_hid = self.h_mult*self.d_model
+        encoder_layer = torch.nn.TransformerEncoderLayer(
+            self.d_model,
+            self.n_heads,
+            d_hid,
+            self.drop_p,
+            batch_first=True,
+            norm_first=self.norm_first
+        )
+        self.transformer_encoder = nn.TransformerEncoder(
+            encoder_layer, self.n_layers
+        )
+        self.decoder = nn.Linear(self.d_model, self.n_tokens)
+
+        self.init_weights()
 
     def tforce_fwd(self, src:torch.Tensor,
                       mask:torch.Tensor=None,
@@ -495,6 +526,309 @@ class BlotchTokenModel(TransformerModel):
             if not incl_all_inpts:
                 ret_dict["preds"] = ret_dict["preds"][:,1:]
         return ret_dict
+
+class HFModel(Model):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'Transformer'
+
+        config = self.get_config()
+        self.encoder = AutoModelForCausalLM.from_config(config)
+
+        if hasattr(self.encoder, "transformer"):
+            if hasattr(self.encoder.transformer, "wpe"):
+                wpe = self.encoder.transformer.wpe
+                for name, p in wpe.named_parameters():
+                    print("Turning off gradients for", name)
+                    p.requires_grad = self.learn_posencs
+
+        self.embeddings = self.encoder.get_input_embeddings()
+        self.decoder = nn.Linear( self.d_model, self.n_tokens )
+        self.encoder.lm_head = self.decoder
+
+        self.init_weights()
+
+        self.register_buffer(
+            "arange", torch.arange(self.max_posencs)
+        )
+
+    def get_config(self):
+        """
+        Finds the appropirate configuration when using Huggingface
+        models.
+        """
+        d_hid = self.h_mult*self.d_model
+        config_kwargs = {
+            "vocab_size": self.n_tokens+self.n_btokens,
+            "hidden_size": self.d_model,
+            "intermediate_size": d_hid,
+            "num_hidden_layers": self.n_layers,
+            "num_attention_heads": self.n_heads,
+            "hidden_act": self.actv_fxn,
+            "n_positions": self.max_posencs,
+            "rotary_dim": self.d_model//self.n_heads,
+            "n_ctx": self.max_posencs,
+            "n_embd": self.d_model,
+            "n_head": self.n_heads,
+            "n_inner": d_hid,
+            "activation_function": self.actv_fxn,
+            "resid_pdrop": self.drop_p,
+            "embd_pdrop":  0,
+            "attn_pdrop":  self.drop_p,
+            "scale_attn_weights": self.scale_attn_weights,
+            "scale_attn_by_inverse_layer_idx": self.scale_by_inv_layer,
+            "tie_word_embeddings": False,
+            "torch_dtype": "float32",
+            "reorder_and_upcast_attn": self.reorder_and_upcast,
+            "add_cross_attention": False,
+        }
+        if self.hf_model_type=="gpt2":
+            config = GPT2Config()
+        elif self.hf_model_type == "gptj":
+            config = GPTJConfig()
+        elif self.hf_model_type == "llama":
+            config = LlamaConfig()
+        config.update(config_kwargs)
+        return config
+
+    def tforce_fwd(self, src:torch.Tensor,
+                      mask:torch.Tensor=None,
+                      pad_mask:torch.Tensor=None,
+                      is_causal:bool=None):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Tensor, shape ``[seq_len, seq_len]``
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            is_causal: bool
+                If specified, applies a causal mask as mask (optional)
+                and ignores attn_mask for computing scaled dot product
+                attention.
+        Returns:
+            output Tensor of shape ``[bsize, seq_len, n_tokens]``
+        """
+        pmask = ~(pad_mask.bool())
+        pos_ids = get_pos_ids(
+            pmask, arange=self.arange, pad_pos_skip=self.pad_pos_skip
+        )
+        output = self.encoder(
+            src,
+            attention_mask=pmask,
+            position_ids=pos_ids,
+        )
+        return { "preds": output.logits }
+
+    def freedom_fwd(self, src:torch.Tensor,
+                      mask:torch.Tensor=None,
+                      pad_mask:torch.Tensor=None,
+                      is_causal:bool=None,
+                      n_steps:int=10,
+                      incl_all_inpts:bool=False,
+                      pad_pos_skip:bool=False,
+                      temperature=None):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Tensor, shape ``[seq_len, seq_len]``
+            pad_mask: Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            is_causal: bool
+                If specified, applies a causal mask as mask (optional)
+                and ignores attn_mask for computing scaled dot product
+                attention.
+            n_steps: int
+                the number of prediction steps if not using teacher
+                forcing
+            incl_all_inpts: bool
+                if true, will include all input tokens in the output
+                prediction tensor. otherwise only includes "predicted
+                spaces". "predicted spaces" includes the shifted initial
+                inputs.  This is useful to save a concatenation during
+                the data bootstrapping phase.
+            pad_pos_skip: bool
+                if true, will skip over masked tokens when applying
+                positional encodings based on the pad mask. True values
+                in the mask will be skipped.
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
+        Returns:
+            output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
+        """
+
+        B,S = src.shape
+        n_loops = n_steps + 1
+
+        pad_mask = torch.nn.functional.pad(
+            ~(pad_mask.bool()), (0, n_loops), value=True
+        )
+        ids = torch.zeros_like(pad_mask).long()
+        ids[:,:S] = src
+        pos_ids = get_pos_ids(
+            pad_mask, arange=self.arange, pad_pos_skip=self.pad_pos_skip
+        )
+        preds = torch.zeros(
+            (B,S+n_steps+incl_all_inpts,self.n_tokens),
+            device=DEVICES[pad_mask.get_device()]
+        )
+        preds[:,:S-1+incl_all_inpts].scatter_(
+            dim=-1,
+            index=src[:, 1-incl_all_inpts:S, None],
+            src=torch.ones_like(preds[:, :S-1+incl_all_inpts])
+        )
+
+        past_key_values = None
+        inpt = ids[:,:S]
+        pids = pos_ids[:,:S]
+        for step in range(n_loops):
+            output = self.encoder(
+                inpt,
+                attention_mask=pad_mask[:,:S+step],
+                position_ids=pids,
+                use_cache=True,
+                past_key_values=past_key_values
+            )
+            past_key_values = output.past_key_values
+            pred = output.logits[:,-1]
+            preds[:,S-1+step+incl_all_inpts] = pred
+            if step < n_steps:
+                argmaxs = self.sample_with_temperature(
+                    pred, temperature
+                ).squeeze()
+                ids[:,S+step] = argmaxs
+                inpt = ids[:,S+step:S+step+1]
+                pids = pos_ids[:,S+step:S+step+1]
+        return {"preds": preds}
+
+
+class HFBlotchModel(HFModel):
+    """
+    This model type includes a special token type indicating the
+    blotch_p quantity. The token type is handled automatically by
+    the forward function. Simply argue the appropriate blotch_p in the
+    forward function. Generally speaking, the blotch_p will be rounded
+    to the nearest 0.1, and you cannot exceed the blotch_p_max value
+    set at the start.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.model_type = 'Blotch'
+        self.boffset = self.n_tokens
+
+    def forward(self, src:torch.Tensor,
+                      mask:torch.Tensor=None,
+                      pad_mask:torch.Tensor=None,
+                      is_causal:bool=None,
+                      tforce:bool=True,
+                      n_steps:int=10,
+                      temperature=None,
+                      incl_all_inpts=False,
+                      blotch_p=None,
+                      *args, **kwargs):
+        """
+        Arguments:
+            src: Tensor, shape ``[bsize, seq_len]``
+            mask: Bool Tensor, shape ``[seq_len, seq_len]``
+            pad_mask: Bool Tensor, shape ``[bsize, seq_len]``
+                true means padding
+            is_causal: bool
+                If specified, applies a causal mask as mask (optional)
+                and ignores attn_mask for computing scaled dot product
+                attention.
+            tforce: bool
+                determines whether or not to teacherforce
+            n_steps: int
+                the number of prediction steps if not using teacher
+                forcing
+            temperature: float
+                a parameter to adjust the entropy of the
+                token sampling. high temperature means high entropy
+            incl_all_inpts: bool
+                if true, will include all input tokens in the output
+                prediction tensor. otherwise only includes "predicted
+                spaces". Only applies if using freedom fwd. This is
+                useful to save a concatenation during the data
+                bootstrapping phase.
+            pad_pos_skip: bool
+                if true, will skip over tokens when applying positional
+                encodings based on the pad mask.
+            blotch_p: float
+                the amount of blotching to use. If None is argued, the
+                blotching is sampled from bp_min to bp_max
+                member variables.
+        Returns:
+            if tforce:
+              output Tensor of shape ``[bsize, seq_len, n_tokens]``
+            else:
+              output Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
+        """
+        if blotch_p is not None:
+            blotch_ids = self.get_blotch_ids(blotch_p)
+            if len(blotch_ids) == 1:
+                # Just creates a tensor of len(src) of all blotch_id values
+                blotch_ids = torch.full((len(src),), blotch_ids.item())
+            blotch_p = (blotch_ids-self.n_tokens).float()/self.bp_gran
+        else:
+            blotch_range = torch.rand(len(src))
+            blotch_ids=(blotch_range*self.n_btokens).long()
+            blotch_p = blotch_ids.float()/self.bp_gran
+            #print()
+            ##blotch_p = blotch_range*self.bp_diff+self.bp_min
+            #print("No argued bp")
+            #print("bids:", blotch_ids[:10])
+            #print("bps:", blotch_p[:10])
+            #print("bids unique:", torch.unique(blotch_ids))
+            #print("bps unique:", torch.unique(blotch_p))
+            #print("bid distr:")
+            #hist = {i: (blotch_ids==i).float().mean() for i in range(11)}
+            #for k in hist:
+            #    print(k, "-", hist[k])
+            blotch_ids += self.n_tokens
+        blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
+
+        if tforce:
+            blotch_mask = get_blotch_mask(
+                src,
+                sep_idx=self.sep_idx,
+                blotch_p=blotch_p,
+            )
+            bmean = blotch_mask.float().mean(-1)
+            pad_mask = pad_mask|blotch_mask.to(DEVICES[pad_mask.get_device()])
+            pad_mask = torch.nn.functional.pad(
+                pad_mask, (1, 0), value=False
+            )
+            src = torch.cat([blotch_ids[...,None], src], dim=-1)
+
+            ret_dict = self.tforce_fwd(
+                src=src,
+                mask=mask,
+                pad_mask=pad_mask,
+                is_causal=is_causal
+            )
+            ret_dict["blotch_mask"] = blotch_mask
+            # Remove the blotch token
+            ret_dict["preds"] = ret_dict["preds"][:,1:]
+        else:
+            src = torch.cat([blotch_ids[...,None], src], dim=-1)
+            pad_mask = torch.nn.functional.pad(
+                pad_mask, (1, 0), value=False
+            )
+            ret_dict = self.freedom_fwd(
+                src=src,
+                mask=mask,
+                pad_mask=pad_mask,
+                is_causal=is_causal,
+                n_steps=n_steps,
+                incl_all_inpts=False,
+                temperature=temperature,
+            )
+            # Don't need to remove blotch token because freedom_fwd
+            # always does it for us.
+            if not incl_all_inpts:
+                ret_dict["preds"] = ret_dict["preds"][:,1:]
+        return ret_dict
+
 
 def generate_square_subsequent_mask(sz: int) -> Tensor:
     """

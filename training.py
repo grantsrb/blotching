@@ -743,7 +743,11 @@ def make_model(hyps):
     if init_checkpt is not None and init_checkpt.strip()!="":
         print("Initializing from checkpoint", init_checkpt)
         checkpt = ml_utils.save_io.load_checkpoint(init_checkpt)
-        model.load_state_dict(checkpt["state_dict"])
+        try:
+            model.load_state_dict(checkpt["state_dict"])
+        except:
+            model.arange = checkpt["state_dict"]["arange"]
+            model.load_state_dict(checkpt["state_dict"])
     return model
 
 def hyper_error_catching(hyps):
@@ -754,7 +758,10 @@ def hyper_error_catching(hyps):
     """
     if not hyps["blotch_p"] and not hyps.get("blotch_p_min", None) and\
             not hyps.get("blotch_p_max", None):
-        hyps["model_type"] = "TransformerModel"
+        if hyps["model_type"]=="HFBlotchModel":
+            hyps["model_type"] = "HFModel"
+        else:
+            hyps["model_type"] = "TransformerModel"
     if "init_data" in hyps:
         print("assuming init_data was meant to be init_samples")
         hyps["init_samples"] = hyps["init_data"]
