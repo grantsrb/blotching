@@ -70,6 +70,7 @@ class DataCache(torch.utils.data.Dataset):
                        dtype="long",
                        prob_len=None,
                        meta_data=None,
+                       pad_id=0,
                        *args, **kwargs):
         """
         max_samples: int
@@ -85,11 +86,14 @@ class DataCache(torch.utils.data.Dataset):
             solution begins. This is useful to speed up operations.
         meta_data: dict of lists (optional)
             meta data corresponding to each row in the data
+        pad_id: int
+            the default padding id
         """
         self.batch_size = batch_size
         if not max_samples and init_data is not None:
             max_samples = len(init_data)
-        self.cache = torch.zeros(max_samples, seq_len)
+        self.pad_id = pad_id
+        self.cache = torch.full((max_samples, seq_len), self.pad_id)
         if dtype=="long": self.cache = self.cache.long()
         self.is_full = False
         self.idx = 0
@@ -131,16 +135,24 @@ class DataCache(torch.utils.data.Dataset):
             strt = self.idx
             self.idx = strt+len(new_data)
             self.cache[strt:self.idx, :sl] = new_data[:,:sl]
+            if sl<self.seq_len:
+                self.cache[strt:self.idx,sl:] = self.pad_id
         elif len(new_data) > self.max_samples:
             self.cache[:,:sl] = new_data[:self.max_samples, :sl]
+            if sl<self.seq_len:
+                self.cache[:,sl:] = self.pad_id
             self.idx = 0
             self.is_full = True
         else: # Need to wrap around
             self.is_full = True
             cram = self.max_samples-self.idx
             self.cache[self.idx:, :sl] = new_data[:cram, :sl]
+            if sl<self.seq_len:
+                self.cache[self.idx:,sl:] = self.pad_id
             self.idx = len(new_data)-cram
             self.cache[:self.idx, :sl] = new_data[cram:, :sl]
+            if sl<self.seq_len:
+                self.cache[:self.idx,sl:] = self.pad_id
         if self.idx >= self.max_samples:
             self.is_full = True
             self.idx = 0
@@ -1276,7 +1288,8 @@ def get_data_cache(math_env,
         seq_len=seq_len,
         batch_size=batch_size,
         init_data=data,
-        prob_len=prob_len
+        prob_len=prob_len,
+        pad_id=tokenizer.pad_idx,
     )
     if ret_strings:
         return data_cache, probs, solns
@@ -1376,7 +1389,8 @@ def get_validation_set(
             "labels": np.asarray(labels, dtype="object"),
             "probs":  np.asarray(probs, dtype="object"),
             "solns":  np.asarray(solns, dtype="object")
-        }
+        },
+        pad_id=tokenizer.pad_idx,
     )
     return data_cache
 
@@ -1491,6 +1505,7 @@ def make_data_cache(probs,
             kwargs["meta_data"]["labels"] = np.asarray(
                 labels,dtype="object"
             )
+        kwargs["pad_id"] = tokenizer.pad_idx
     data_cache = DataCache( **kwargs )
     if ret_strings: return data_cache, probs, solns
     return data_cache
