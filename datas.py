@@ -881,9 +881,12 @@ def axe_data(
     """
     wrapped_model.eval()
     abs_tol = hyps.get("abs_axe_tol", math.inf)
+    if not abs_tol: abs_tol = math.inf
     rel_tol = hyps.get("rel_axe_tol", math.inf)
+    if not rel_tol: rel_tol = math.inf
     bsize = hyps.get("val_batch_size", 500)
     n_loops = hyps.get("axe_loops", 3)
+    if n_loops < 0: n_loops = np.inf
     plen = data_cache.prob_len
     device = wrapped_model.model.get_device()
     pad = tokenizer.pad_idx
@@ -1061,6 +1064,7 @@ def augment_data(
     """
     bsize = hyps.get("val_batch_size", 500)
     aug_loops = hyps.get("aug_loops", 3)
+    if aug_loops < 0: aug_loops = np.inf
     plen = data_cache.prob_len
     device = model.get_device()
     pad = tokenizer.pad_idx

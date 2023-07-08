@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-from utils import get_blotch_mask, get_pos_ids
+from utils import get_blotch_mask, get_pos_ids, get_tok_mask
 import ml_utils
 import math
 
@@ -31,6 +31,7 @@ class Model(torch.nn.Module):
                        blotch_p:float=0.3,
                        blotch_p_min:float=None,
                        blotch_p_max:float=None,
+                       tok_drop_p:float=0,
                        n_btokens:int=None,
                        drop_p:float=0.5,
                        max_posencs:int=1000,
@@ -71,6 +72,9 @@ class Model(torch.nn.Module):
         blotch_p_max: float
             the highest blotch probability for the blotch tokens. 1
             means all blotching.
+        tok_drop_p: float
+            the probability of randomly dropping a token. 0 means no
+            token dropping.
         n_btokens: int
             the number of blotch tokens. This is effectively a
             granularity parameter for blotch values. If None, will
@@ -112,6 +116,7 @@ class Model(torch.nn.Module):
         self.h_mult = h_mult
         self.n_layers = n_layers
         self.blotch_p = blotch_p
+        self.tok_drop_p = tok_drop_p
         self.bp_min = blotch_p_min
         if blotch_p_min is None: self.bp_min = blotch_p
         self.bp_max = blotch_p_max
@@ -185,6 +190,7 @@ class Model(torch.nn.Module):
                       temperature=None,
                       incl_all_inpts=False,
                       blotch_p=None,
+                      tok_drop_p=None,
                       *args, **kwargs):
         """
         Arguments:
@@ -215,6 +221,9 @@ class Model(torch.nn.Module):
                 encodings based on the pad mask.
             blotch_p: float
                 the blotch probability. 0 means no blotching.
+            tok_drop_p: float
+                the probability of randomly dropping a token. 0 means no
+                token dropping.
         Returns:
             if tforce:
               output Tensor of shape ``[bsize, seq_len, n_tokens]``
@@ -222,13 +231,20 @@ class Model(torch.nn.Module):
               output Tensor of shape ``[bsize,seq_len+n_steps,n_tokens]``
         """
         if tforce:
-            if self.blotch_p and self.training:
+            if (self.blotch_p and self.training) or blotch_p:
+                if not blotch_p: blotch_p = self.blotch_p
                 blotch_mask = get_blotch_mask(
                     src,
                     sep_idx=self.sep_idx,
-                    blotch_p=self.blotch_p,
+                    blotch_p=blotch_p,
                 )
                 pad_mask = pad_mask|blotch_mask
+            if (self.tok_drop_p and self.training) or tok_drop_p:
+                if not tok_drop_p: tok_drop_p = self.tok_drop_p
+                tok_mask = get_tok_mask(
+                    src=src, tok_p=tok_drop_p, sep_idx=self.sep_idx
+                )
+                pad_mask = pad_mask|tok_mask
 
             ret_dict = self.tforce_fwd(
                 src=src,
@@ -236,8 +252,10 @@ class Model(torch.nn.Module):
                 pad_mask=pad_mask,
                 is_causal=is_causal
             )
-            if self.blotch_p and self.training:
+            if blotch_p or (self.blotch_p and self.training):
                 ret_dict["blotch_mask"] = blotch_mask
+            if tok_drop_p or (self.tok_drop_p and self.training):
+                ret_dict["tok_mask"] = tok_mask
         else:
             ret_dict = self.freedom_fwd(
                 src=src,
@@ -423,6 +441,7 @@ class BlotchTokenModel(TransformerModel):
                       temperature=None,
                       incl_all_inpts=False,
                       blotch_p=None,
+                      tok_drop_p=None,
                       *args, **kwargs):
         """
         Arguments:
@@ -455,6 +474,9 @@ class BlotchTokenModel(TransformerModel):
                 the amount of blotching to use. If None is argued, the
                 blotching is sampled from bp_min to bp_max
                 member variables.
+            tok_drop_p: float
+                the probability of randomly dropping a token. 0 means no
+                token dropping.
         Returns:
             if tforce:
               output Tensor of shape ``[bsize, seq_len, n_tokens]``
@@ -493,10 +515,20 @@ class BlotchTokenModel(TransformerModel):
             )
             bmean = blotch_mask.float().mean(-1)
             pad_mask = pad_mask|blotch_mask.to(DEVICES[pad_mask.get_device()])
+
+            if (self.tok_drop_p and self.training) or tok_drop_p:
+                if not tok_drop_p: tok_drop_p = self.tok_drop_p
+                tok_mask = get_tok_mask(
+                    src=src, tok_p=tok_drop_p, sep_idx=self.sep_idx
+                )
+                pad_mask = pad_mask|tok_mask
+
+
             pad_mask = torch.nn.functional.pad(
                 pad_mask, (1, 0), value=False
             )
             src = torch.cat([blotch_ids[...,None], src], dim=-1)
+
 
             ret_dict = self.tforce_fwd(
                 src=src,
@@ -507,6 +539,8 @@ class BlotchTokenModel(TransformerModel):
             ret_dict["blotch_mask"] = blotch_mask
             # Remove the blotch token
             ret_dict["preds"] = ret_dict["preds"][:,1:]
+            if (self.tok_drop_p and self.training) or tok_drop_p:
+                ret_dict["tok_mask"] = tok_mask
         else:
             src = torch.cat([blotch_ids[...,None], src], dim=-1)
             pad_mask = torch.nn.functional.pad(
@@ -795,6 +829,14 @@ class HFBlotchModel(HFModel):
             )
             bmean = blotch_mask.float().mean(-1)
             pad_mask = pad_mask|blotch_mask.to(DEVICES[pad_mask.get_device()])
+
+            if (self.tok_drop_p and self.training) or tok_drop_p:
+                if not tok_drop_p: tok_drop_p = self.tok_drop_p
+                tok_mask = get_tok_mask(
+                    src=src, tok_p=tok_drop_p, sep_idx=self.sep_idx
+                )
+                pad_mask = pad_mask|tok_mask
+
             pad_mask = torch.nn.functional.pad(
                 pad_mask, (1, 0), value=False
             )
@@ -809,6 +851,8 @@ class HFBlotchModel(HFModel):
             ret_dict["blotch_mask"] = blotch_mask
             # Remove the blotch token
             ret_dict["preds"] = ret_dict["preds"][:,1:]
+            if (self.tok_drop_p and self.training) or tok_drop_p:
+                ret_dict["tok_mask"] = tok_mask
         else:
             src = torch.cat([blotch_ids[...,None], src], dim=-1)
             pad_mask = torch.nn.functional.pad(
@@ -1082,45 +1126,8 @@ class LossWrapper(torch.nn.Module):
             inpt_pad_mask = inpt_pad_mask|(data["input_ids"]==eos_idx)
         else: inpt_pad_mask = data["inpt_pad_mask"].clone()
         if "out_pad_mask" not in data:
-            out_pad_mask  = data["output_ids"]==pad_idx
+            out_pad_mask = data["output_ids"]==pad_idx
         else: out_pad_mask = data["out_pad_mask"].clone()
-
-        #print()
-        #print("Full inpt:",
-        #  self.tokenizer.decode(data["input_ids"][0]))
-        #print("Full Outpt:",
-        #  self.tokenizer.decode(data["output_ids"][0]))
-        #print("dropped inpt:",
-        #  self.tokenizer.decode(data["input_ids"][0][inpt_pad_mask[0]]))
-        #print("dropped out:",
-        #  self.tokenizer.decode(data["output_ids"][0][out_pad_mask[0]]))
-        #print("post inpt:",
-        #  self.tokenizer.decode(data["input_ids"][0][~inpt_pad_mask[0]]))
-        #print("post out:",
-        #  self.tokenizer.decode(data["output_ids"][0][~out_pad_mask[0]]))
-
-
-        #non_overlaps = inpt_pad_mask.sum(-1)!=out_pad_mask.sum(-1)
-        #if torch.any(non_overlaps):
-        #    idx = torch.argmax(non_overlaps.long(), axis=-1)
-        #    print("idx:", idx, "inpt:", inpt_pad_mask.sum(-1)[idx],
-        #                       "outp:", out_pad_mask.sum(-1)[idx])
-        #    print("early inpt:",
-        #      self.tokenizer.decode(data["input_ids"][idx]))
-        #    print("early dropped out:",
-        #      self.tokenizer.decode(data["output_ids"][idx]))
-        #    print("early dropped inpt:",
-        #      self.tokenizer.decode(data["input_ids"][idx][inpt_pad_mask[idx]]))
-        #    print("early dropped out:",
-        #      self.tokenizer.decode(data["output_ids"][idx][out_pad_mask[idx]]))
-        #    print("early post inpt:",
-        #      self.tokenizer.decode(data["input_ids"][idx][~inpt_pad_mask[idx]]))
-        #    print("early post out:",
-        #      self.tokenizer.decode(data["output_ids"][idx][~out_pad_mask[idx]]))
-        #    print("early Inpt mask sum:", inpt_pad_mask.float().sum())
-        #    print("early Out mask sum:", out_pad_mask.float().sum())
-        #else:
-        #    print("No conflicting overlaps found?")
 
         # Need to be careful with intermediate padding
         if tforce:
@@ -1137,6 +1144,11 @@ class LossWrapper(torch.nn.Module):
                 blotch_mask = ret_dict["blotch_mask"]
                 inpt_pad_mask = inpt_pad_mask|blotch_mask
                 out_pad_mask[:,:-1]=out_pad_mask[:,:-1]|blotch_mask[:,1:]
+            if "tok_mask" in ret_dict:
+                tok_mask = ret_dict["tok_mask"]
+                tok_mask[data["input_ids"]==eos_idx] = False
+                inpt_pad_mask = inpt_pad_mask|tok_mask
+                out_pad_mask[:,:-1]=out_pad_mask[:,:-1]|tok_mask[:,1:]
         else:
             if prob_len is None:
                 s = self.tokenizer.sep_idx
@@ -1155,10 +1167,6 @@ class LossWrapper(torch.nn.Module):
                 tokenizer=self.tokenizer
             )
             preds = ret_dict["preds"]
-            #print("preds:", preds.shape)
-            #print("Sep:", self.tokenizer.sep_idx)
-            #print("eqls:", self.tokenizer.sep_idx)
-            #print("inpt:", data["input_ids"].shape)
             #print(
             #    "input:",
             #    data["input_ids"][0,:plen][~inpt_pad_mask[0,:plen]]
@@ -1175,8 +1183,6 @@ class LossWrapper(torch.nn.Module):
                 prob_len = torch.argmax(data["input_ids"][0]==s,dim=-1)
             inpt_pad_mask[...,:prob_len] = True
             out_pad_mask [...,:prob_len] = True
-            #print("intlprob Inpt mask sum:", inpt_pad_mask.float().sum())
-            #print("intlprob Out mask sum:", out_pad_mask.float().sum())
 
         #print()
         #print("Full inpt:",
@@ -1200,7 +1206,53 @@ class LossWrapper(torch.nn.Module):
         )[inpt_mask]
         labels = out_ids.reshape(-1)[out_mask]
         reduction = "mean" if reduce_metrics else "none"
-        loss=self.loss_fxn(ps,labels,reduction=reduction)*self.loss_scale
+        try:
+            loss = self.loss_scale*self.loss_fxn(
+                ps,labels,reduction=reduction
+            )
+        except:
+            for i in range(len(data["input_ids"])):
+                print()
+                print("Full inpt:",
+                  self.tokenizer.decode(data["input_ids"][i]))
+                print("Full Outpt:",
+                  self.tokenizer.decode(data["output_ids"][i]))
+                print("dropped inpt:",
+                  self.tokenizer.decode(
+                    data["input_ids"][i][inpt_pad_mask[i]]))
+                print("dropped out:",
+                  self.tokenizer.decode(
+                    data["output_ids"][i][out_pad_mask[i]]))
+                print("post inpt:",
+                  self.tokenizer.decode(
+                    data["input_ids"][i][~inpt_pad_mask[i]]))
+                print("post out:",
+                  self.tokenizer.decode(
+                    data["output_ids"][i][~out_pad_mask[i]]))
+
+            idx = inpt_pad_mask.float().sum(-1)!=out_pad_mask.float().sum(-1)
+            print()
+            print()
+            print()
+            print()
+            for i in range(idx.long().sum(-1)):
+                print("Full inpt:",
+                  self.tokenizer.decode(data["input_ids"][idx][i]))
+                print("Full Outpt:",
+                  self.tokenizer.decode(data["output_ids"][idx][i]))
+                print("dropped inpt:",
+                  self.tokenizer.decode(
+                    data["input_ids"][idx][i][inpt_pad_mask[idx][i]]))
+                print("dropped out:",
+                  self.tokenizer.decode(
+                    data["output_ids"][idx][i][out_pad_mask[idx][i]]))
+                print("post inpt:",
+                  self.tokenizer.decode(
+                    data["input_ids"][idx][i][~inpt_pad_mask[idx][i]]))
+                print("post out:",
+                  self.tokenizer.decode(
+                    data["output_ids"][idx][i][~out_pad_mask[idx][i]]))
+            assert False
         if self.training and not no_grad: loss.backward()
         elif not reduce_metrics:
             temp = torch.zeros_like(out_ids).float()
@@ -1273,7 +1325,7 @@ def loss_and_acc(preds, labels, attn, loss_fxn, loss_scale=1,top_k=None):
 if __name__=="__main__":
     #def blotch(idxs, sep_idx, blotch_p=0.4, indy_blotching=False):
     sep_idx = 0
-    blotch_p = 0.25
+    blotch_p = 1
     n_samples = 5000
     slen = 9
     allow_contig = True
@@ -1283,25 +1335,34 @@ if __name__=="__main__":
     idxs[2:,1:-1:2] = sep_idx
     print("Idxs:", idxs)
 
-    blotches = torch.ones(len(idxs))*torch.FloatTensor([
-        0.1, 0.3, 0.6, 0.9
-    ])
-    n_seps = torch.max(torch.sum(idxs==sep_idx, dim=1))
-    for i in range(n_seps):
-        bmask = get_blotch_mask(
-            idxs,
+    for tok_p in [i/10. for i in range(11)]:
+        print("tok_p:", tok_p)
+        bmask = get_tok_mask(
+            src=idxs,
+            tok_p=tok_p,
             sep_idx=sep_idx,
-            #blotch_p=blotches,
-            allow_contig=allow_contig,
-            step_idx = i
         )
-        print("blotch:", idxs[bmask])
-    #for row in range(idxs.shape[0]):
-    #    print()
-    #    print("Unblotched:", idxs[row])
-    #    print("Mask:", bmask[row])
-    #    print("Blotched:", idxs[row][~bmask[row]])
-    #print("bmask p:", bmask.float().sum()/2/(idxs==sep_idx).float().sum())
+        for row in range(idxs.shape[0]):
+            print()
+            print("Unblotched:", idxs[row])
+            print("Mask:", bmask[row])
+            print("Blotched:", idxs[row][~bmask[row]])
+        print()
+
+    #blotches = torch.ones(len(idxs))*torch.FloatTensor([
+    #    0.1, 0.3, 0.6, 0.9
+    #])
+    #n_seps = torch.max(torch.sum(idxs==sep_idx, dim=1))
+    #for i in range(n_seps):
+    #    bmask = get_blotch_mask(
+    #        idxs,
+    #        sep_idx=sep_idx,
+    #        #blotch_p=blotches,
+    #        allow_contig=allow_contig,
+    #        step_idx = i
+    #    )
+    #    print("bmask:", bmask)
+    #    print("blotch:", idxs[bmask])
 
     #idxs = torch.randint(2,9, size=(n_samples,slen))
     #idxs[:2,:-1:2] = sep_idx

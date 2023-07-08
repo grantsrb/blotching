@@ -60,7 +60,7 @@ if __name__=="__main__":
     # Integer argument if you want to randomly sample n problems rather
     # than systematically looking at all possible problems.
     n_samples = 2000 # the number of samples. if None, does all
-    use_val_file = False # uses validation data from training. takes
+    use_val_file = True # uses validation data from training. takes
     # priority over use_train_file
     use_train_file = False # overwritten by use_val_file
 
@@ -248,7 +248,7 @@ if __name__=="__main__":
 
                     stats = get_stats(tokenizer=tokenizer, ids=pred_ids)
                     df_dict["ans"]      += stats["resp"]
-                    df_dict["pred_str"] += stats["pred"]
+                    df_dict["pred_str"] += str(stats["pred"])
 
                     out_ids = data["output_ids"][:,plen:]
                     acc = pred_ids[:,plen+1:]==out_ids

@@ -86,9 +86,7 @@ def vectorized_check_correct(
 
     oseps = (oseps|((oaranges<soln_ends[:,None])&(output_ids==pad))).long()
 
-    last_sep_idxs = torch.argsort(
-        oseps.long(), dim=-1, descending=True
-    )[torch.arange(len(oseps)).long(), oseps.sum(-1).long()-1]+int(has_conf)
+    last_sep_idxs = arglast(oseps.long(), dim=-1) + int(has_conf)
     soln_ends = soln_ends[:,None]
     soln_lens = soln_ends - last_sep_idxs[:,None]
     soln_idxs = (oaranges<soln_ends)&(oaranges>=(soln_ends-soln_lens))
@@ -116,6 +114,67 @@ def vectorized_check_correct(
     corrects = corrects.sum(-1)
     corrects = corrects.squeeze()==soln_lens.squeeze()
     return corrects
+
+def get_soln_mask(
+        ids,
+        eos_id,
+        sep_id,
+        pad_id,
+        has_conf=False
+    ):
+    """
+    Finds a boolean mask over the final answer, no sep or eos included
+
+    # We find the eos in solutions
+    # We then find the ground truth solution length
+    # We then create a mask that spreads the length of the soln starting
+    #   from the eos token
+
+    Arguments:
+        ids: torch LongTensor (N,T)
+        eos_id: int
+        sep_id: int
+        pad_id: int
+        has_conf: bool
+            if true, will assume a conf prediction follows the sep
+            token
+    Returns:
+        ans_mask: Bool Tensor (N,)
+            True values indicate the final output
+    """
+    device = DEVICES[ids.get_device()]
+
+    seps = ids==sep_id
+    aranges = torch.arange(ids.shape[1])[None].repeat(
+        (len(ids), 1)
+    ).to(device)
+
+    soln_ends = torch.argmax( (ids==eos_id).long(),dim=-1 )
+
+    # Need to look at padding because it's possible to have
+    # =PPPP45E as an answer. Padding is not to be worried about later
+    # because it's factored into the sum to find the last index
+    seps = (seps|((aranges<soln_ends[:,None])&(ids==pad_id))).long()
+
+    last_sep_idxs = arglast(seps.long(), dim=-1)+int(has_conf)
+    soln_ends = soln_ends[:,None]
+    soln_lens = soln_ends - last_sep_idxs[:,None]
+    soln_idxs = (aranges<soln_ends)&(aranges>=(soln_ends-soln_lens))
+    return soln_idxs
+
+def arglast(mask, dim=-1):
+    """
+    This function finds the index of the last max value along a given
+    dimension.
+
+    Args:
+        mask: bool (B,N)
+        dim: int
+    Returns:
+        the index of the last true value along the dimension
+    """
+    argmaxs = torch.argmax(torch.flip(mask, dims=(dim,)), dim=dim)
+    return mask.shape[dim] - argmaxs - 1
 
 def get_blotch_mask(
         idxs,
@@ -200,8 +259,8 @@ def get_blotch_mask(
             prev_row = row
     else:
         sep_coords = torch.nonzero(seps)
-        if type(blotch_p)==type(float()):
-            blotch_p = torch.full((1,), blotch_p)
+        if type(blotch_p)==type(float()) or type(blotch_p)==type(int()):
+            blotch_p = torch.full((1,1), blotch_p)
         elif len(blotch_p.shape)==1: blotch_p = blotch_p[..., None].cpu()
         do_blotches = torch.rand(idxs.shape)<=blotch_p
         is_contig = False
@@ -215,6 +274,36 @@ def get_blotch_mask(
                     is_contig = True
             else: is_contig = False
     return mask
+
+
+def get_tok_mask(src, tok_p, sep_idx):
+    """
+    Returns a mask to randomly excise tokens from the context. Only
+    drops tokens within the possible blotching locations.
+
+    Args:
+        src: torch Long tensor (B, S)
+        tok_p: float or Float Tensor (B,S)
+            the probability of dropping a token. 1 means all tokens
+            are dropped. Only drops tokens within the possible
+            blotching locations.
+        sep_idx: int
+            the separation index. in this project, the separation index
+            is most likely the equals sign.
+    Returns:
+        mask: torch bool tensor (B,S)
+    """
+    temp = get_blotch_mask(
+        src,
+        sep_idx=sep_idx,
+        blotch_p=1.,
+    )
+    tok_mask = torch.rand(src.shape)<tok_p
+    tok_mask[:,0] = False
+    tok_mask[:,-1] = False
+    tok_mask = tok_mask.to(DEVICES[src.get_device()])
+    return tok_mask&temp
+
 
 def get_pos_ids(mask, arange=None, pad_pos_skip=True):
     """

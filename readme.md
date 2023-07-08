@@ -161,6 +161,9 @@ then running the following command:
         refers to the sequence length post compression, so the model will
         compress `cmp_len` tokens and then predict `seq_len` tokens.
         if doing rmb_only, `cmp_len` is ignored
+    "tok_drop_p": float
+        the probability of randomly dropping a token in the sequence.
+        0 means no token dropping.
     "blotch_p": float
         the blotch probability. 0 means no blotching. blotching is
         effectively contiguous dropout. It is kept to complete

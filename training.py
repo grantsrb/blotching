@@ -129,9 +129,13 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             tokenizer=tokenizer,
             solns=None,
             plen=hyps["prob_len"],
-            slen=hyps["seq_len"],
-            batch_size=hyps["batch_size"]
+            slen=hyps["seq_len"]-hyps["prob_len"],
+            seq_len=hyps["seq_len"],
+            batch_size=hyps["batch_size"],
+            max_samples=hyps["max_samples"],
         )
+        print("Val Cache Shape:", val_cache.shape)
+        print("Train Cache Shape:", data_cache.shape)
     # This is the case where we can sample freely because we have lots
     # of possible problems
     else:
@@ -267,7 +271,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 ret_preds=True,
                 tforce=True,
                 prob_len=data_cache.prob_len,
-                incl_intl_prob=hyps.get("incl_intl_prob", False)
+                incl_intl_prob=hyps.get("incl_intl_prob", False),
+                blotch_p=hyps.get("blotch_p", 0),
             )
             loss = package["loss"]
             acc = package["acc"]
@@ -510,7 +515,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             ###########################################################
             #### STaR BOOTSTRAPPING
             ###########################################################
-            n_new_samps = 0
+            n_star_samps = 0
             star_loops = hyps.get("star_loops",0)
             if star_loops>0 and epoch>=hyps.get("pre_epochs",3):
                 if rank==0 and verbose: print("Bootstrapping Dataset")
@@ -524,11 +529,12 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 )
                 new_data = torch.vstack(new_data)
                 data_cache.add_data(new_data)
-                n_new_samps = len(new_data)
+                n_star_samps = len(new_data)
+
                 if rank==0 and verbose:
                     try:
-                        print("New samples:", n_new_samps)
-                        if n_new_samps>0:
+                        print("New samples:", n_star_samps)
+                        if n_star_samps>0:
                             sf = hyps['save_folder']
                             fname = os.path.join(sf,"star_samps.txt")
                             with open(fname,"a") as f:
@@ -551,7 +557,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             ###########################################################
             n_aug_samps = 0
             aug_loops = hyps.get("aug_loops",0)
-            if aug_loops>0 and epoch>=hyps.get("pre_epochs",3):
+            if aug_loops!=0 and epoch>=hyps.get("pre_epochs",3):
                 print("Augmenting Dataset")
                 aug_samps = datas.augment_data(
                     hyps=hyps,
@@ -588,9 +594,9 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             ###########################################################
             #### SELECTIVE AXING
             ###########################################################
-            n_axed = 0
+            n_axed_samps = 0
             axe_loops = hyps.get("axe_loops",0)
-            if axe_loops>0 and epoch>=hyps.get("pre_epochs",3):
+            if axe_loops!=0 and epoch>=hyps.get("pre_epochs",3):
                 print("Axing Data Samples")
                 axed_samps = datas.axe_data(
                     hyps=hyps,
@@ -600,14 +606,15 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     in_place=hyps["in_place"],
                     verbose=rank==0 and verbose
                 )
+
                 if not hyps["in_place"]:
                     new_data = torch.vstack(axed_samps)
                     data_cache.add_data(new_data)
-                n_axed = sum([len(x) for x in axed_samps])
+                n_axed_samps = sum([len(x) for x in axed_samps])
                 if rank==0 and verbose:
                     try:
-                        print("Axed samples:", n_axed)
-                        if n_axed>0:
+                        print("Axed samples:", n_axed_samps)
+                        if n_axed_samps>0:
                             sf = hyps['save_folder']
                             fname = os.path.join(sf,"axed_samps.txt")
                             with open(fname,"a") as f:
@@ -643,9 +650,9 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     "val_len_perc":val_len_perc,
                     "val_correct": val_correct,
                     "val_dict": val_dict,
-                    "n_new_samps": n_new_samps,
+                    "n_star_samps": n_star_samps,
                     "n_aug_samps": n_aug_samps,
-                    "n_axed": n_axed,
+                    "n_axed_samps": n_axed_samps,
                     "state_dict":  model.state_dict(),
                     "optim_dict":  optimizer.state_dict(),
                     "hyps":        hyps,
@@ -796,7 +803,7 @@ def hyper_error_catching(hyps):
     choices are set and some obviously wrong hyperparameter settings
     are changed to what the experimenter meant.
     """
-    if not hyps["blotch_p"] and not hyps.get("blotch_p_min", None) and\
+    if not hyps.get("blotch_p_min", None) and\
             not hyps.get("blotch_p_max", None):
         if hyps["model_type"]=="HFBlotchModel":
             hyps["model_type"] = "HFModel"
