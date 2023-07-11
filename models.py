@@ -513,7 +513,6 @@ class BlotchTokenModel(TransformerModel):
                 sep_idx=self.sep_idx,
                 blotch_p=blotch_p,
             )
-            bmean = blotch_mask.float().mean(-1)
             pad_mask = pad_mask|blotch_mask.to(DEVICES[pad_mask.get_device()])
 
             if (self.tok_drop_p and self.training) or tok_drop_p:
@@ -820,7 +819,6 @@ class HFBlotchModel(HFModel):
                 sep_idx=self.sep_idx,
                 blotch_p=blotch_p,
             )
-            bmean = blotch_mask.float().mean(-1)
             pad_mask = pad_mask|blotch_mask.to(DEVICES[pad_mask.get_device()])
 
             if (self.tok_drop_p and self.training) or tok_drop_p:
