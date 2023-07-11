@@ -222,7 +222,8 @@ def get_blotch_mask(
             if int is argued, will only drop the argued semantic step.
             An argument of 0 refers the first semantic step following
             the initial problem. This function will not blotch the
-            final answer.
+            final answer. The final answer is defined by the content
+            after the last sep token and including the eos token.
     Returns:
         blotch_mask: torch BoolTensor (B,S)
             the shape will depend on the argument for indy_blotching

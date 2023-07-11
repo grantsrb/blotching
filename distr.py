@@ -55,7 +55,7 @@ def distr_ranges(script, meta, rng_paths):
     stdout_folder = "./tmux_logs/"
     if not os.path.exists(stdout_folder):
         os.mkdir(stdout_folder)
-    path = os.path.join(hyps["save_root"],hyps["exp_name"])
+    path = os.path.expanduser(os.path.join(hyps["save_root"],hyps["exp_name"]))
     if not os.path.exists(path):
         os.mkdir( path )
 
