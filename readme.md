@@ -93,6 +93,10 @@ then running the following command:
         original. The value of `star_loops` indicates the number of
         bootstrap loops to perform after each epoch. Each loop attempts
         to collect `val_batch_size` newly sampled problems
+    "star_force_short": bool
+        if true, star bootstrapped samples will only be collected if they
+        are shorter than the ground truth solution. Otherwise, only
+        considers the accuracy of the final solution for collection.
 
     "pre_epochs": int
         the number of epochs to wait before sampling new data

@@ -750,6 +750,7 @@ def bootstrap_data(
         tokenizer,
         env=None,
         held_out_probs=set(),
+        force_short=True,
         verbose=True
     ):
     """
@@ -767,6 +768,9 @@ def bootstrap_data(
             if None, one is constructed using the argued hyps
         held_out_probs: set of str
             any problems that should be held out of the sampling
+        force_short: bool
+            if true, will only collect samples that have a shorter
+            solution length than the ground truth.
     Returns:
         new_data: list of torch tensor [(A,S), (A1,S), ...]
             a list of variable length tensors that are the augmented
@@ -839,6 +843,8 @@ def bootstrap_data(
               dim=-1
             )
             is_short = ends<soln_lens[startx:endx].to(device)
+            if not force_short:
+                is_short = torch.ones_like(is_short).bool()
             is_correct = utils.vectorized_check_correct(
                 tokenizer, fin_solns[startx:endx].to(device), preds
             )

@@ -525,6 +525,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     tokenizer=tokenizer,
                     env=math_env,
                     held_out_probs=all_problems,
+                    force_short=hyps.get("star_force_short", True),
                     verbose=rank==0 and verbose,
                 )
                 new_data = torch.vstack(new_data)

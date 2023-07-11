@@ -759,6 +759,7 @@ class HFBlotchModel(HFModel):
                       temperature=None,
                       incl_all_inpts=False,
                       blotch_p=None,
+                      tok_drop_p=None,
                       *args, **kwargs):
         """
         Arguments:
@@ -791,6 +792,9 @@ class HFBlotchModel(HFModel):
                 the amount of blotching to use. If None is argued, the
                 blotching is sampled from bp_min to bp_max
                 member variables.
+            tok_drop_p: float
+                the probability of randomly dropping a token. 0 means no
+                token dropping.
         Returns:
             if tforce:
               output Tensor of shape ``[bsize, seq_len, n_tokens]``
@@ -807,17 +811,6 @@ class HFBlotchModel(HFModel):
             blotch_range = torch.rand(len(src))
             blotch_ids=(blotch_range*self.n_btokens).long()
             blotch_p = blotch_ids.float()/self.bp_gran
-            #print()
-            ##blotch_p = blotch_range*self.bp_diff+self.bp_min
-            #print("No argued bp")
-            #print("bids:", blotch_ids[:10])
-            #print("bps:", blotch_p[:10])
-            #print("bids unique:", torch.unique(blotch_ids))
-            #print("bps unique:", torch.unique(blotch_p))
-            #print("bid distr:")
-            #hist = {i: (blotch_ids==i).float().mean() for i in range(11)}
-            #for k in hist:
-            #    print(k, "-", hist[k])
             blotch_ids += self.n_tokens
         blotch_ids = blotch_ids.to(DEVICES[src.get_device()])
 
@@ -1062,6 +1055,7 @@ class LossWrapper(torch.nn.Module):
                                              incl_all_inpts=False,
                                              top_k=5,
                                              blotch_p=None,
+                                             tok_drop_p=None,
                                              reduce_metrics=True,
                                              *args, **kwargs):
         """
@@ -1109,6 +1103,9 @@ class LossWrapper(torch.nn.Module):
                 if true, loss and acc will be averaged over all samples.
                 if false, loss and acc will be returned as tensors for
                 each token prediction
+            tok_drop_p: float
+                the probability of randomly dropping a token. 0 means no
+                token dropping.
         Returns:
             ret_dict: dict (keys: str, vals: torch tensor)
                 "loss": torch tensor (1,) or (B,)
@@ -1137,6 +1134,7 @@ class LossWrapper(torch.nn.Module):
                 is_causal=True,
                 tforce=tforce,
                 blotch_p=blotch_p,
+                tok_drop_p=tok_drop_p,
                 tokenizer=self.tokenizer
             )
             preds = ret_dict["preds"]
@@ -1164,6 +1162,7 @@ class LossWrapper(torch.nn.Module):
                 n_steps=tot_len-plen,
                 incl_all_inpts=incl_all_inpts,
                 blotch_p=blotch_p,
+                tok_drop_p=tok_drop_p,
                 tokenizer=self.tokenizer
             )
             preds = ret_dict["preds"]
