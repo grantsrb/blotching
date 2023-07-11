@@ -71,17 +71,27 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     vbsize = hyps.get("val_batch_size",500)
     # if starting from some other checkpoint, we want to keep the
     # same training and validation data as before.
+    all_problems = None
     if hyps.get("init_checkpt", None):
         temp_hyps = ml_utils.save_io.get_hyps(hyps["init_checkpt"])
-        sf = temp_hyps['save_folder']
-        with open(os.path.join(sf,"train_probs.txt"),"r") as f:
-            train_probs = [p.strip() for p in f.readlines()]
-        with open(os.path.join(sf,"val_probs.txt"),"r") as f:
-            val_probs = [p.strip() for p in f.readlines()]
-        all_problems = train_probs + val_probs
-        val_len = len(val_probs)
-        train_len = len(train_probs)
-    else:
+        try:
+            sf = temp_hyps['init_checkpt']
+            if not os.path.isdir(sf):
+                sf = temp_hyps['save_folder']
+            with open(os.path.join(sf,"train_probs.txt"),"r") as f:
+                train_probs = [p.strip() for p in f.readlines()]
+            with open(os.path.join(sf,"val_probs.txt"),"r") as f:
+                val_probs = [p.strip() for p in f.readlines()]
+            all_problems = train_probs + val_probs
+            val_len = len(val_probs)
+            train_len = len(train_probs)
+        except:
+            print(
+                "failed to load train and val problems from cheeckpoint",
+                sf
+            )
+
+    if not all_problems:
         # In some cases, we have fewer possible problems than our argued
         # initial training sample count. So, we first want to collect
         # all possible problems to make sure that we create an appropriate
@@ -271,8 +281,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 ret_preds=True,
                 tforce=True,
                 prob_len=data_cache.prob_len,
-                incl_intl_prob=hyps.get("incl_intl_prob", False),
-                blotch_p=hyps.get("blotch_p", 0),
+                incl_intl_prob=hyps.get("incl_intl_prob", False)
             )
             loss = package["loss"]
             acc = package["acc"]
