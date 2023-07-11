@@ -43,7 +43,7 @@ def get_stats(tokenizer, ids, remove_padding=True):
         if remove_padding: pred = pred.replace(pad, "")
         pred = pred.split(eos)[0]
         splt = pred.split(sep)
-        stats["pred"].append(sep.join(splt[1:]))
+        stats["pred"].append(str(sep.join(splt[1:])))
         stats["length"].append(len(pred))
         stats["resp"].append(splt[-1])
         stats["first"].append(splt[0])
@@ -205,6 +205,8 @@ if __name__=="__main__":
         plen = data_cache.prob_len
         if verbose and rank==0: print("Evaluating Model")
         n_loops = len(iter(data_cache))
+        wrapped_model.eval()
+        model.eval()
         if hyps["model_type"]=="TransformerModel":
             bps = [0.0]
         else:
@@ -219,8 +221,6 @@ if __name__=="__main__":
                     data["input_ids"] = data["input_ids"].to(rank)
                     data["output_ids"] = data["output_ids"].to(rank)
                 with torch.no_grad():
-                    wrapped_model.eval()
-                    model.eval()
 
                     package = wrapped_model(
                         data,
@@ -248,7 +248,7 @@ if __name__=="__main__":
 
                     stats = get_stats(tokenizer=tokenizer, ids=pred_ids)
                     df_dict["ans"]      += stats["resp"]
-                    df_dict["pred_str"] += str(stats["pred"])
+                    df_dict["pred_str"] += stats["pred"]
 
                     out_ids = data["output_ids"][:,plen:]
                     acc = pred_ids[:,plen+1:]==out_ids
@@ -257,10 +257,12 @@ if __name__=="__main__":
                     acc = acc.float().sum(-1)
                     acc = acc / (~out_pad_mask).sum(-1)
                     df_dict["tok_acc"].append(acc.cpu().data.numpy())
-                    correct = np.mean([
-                      stats["resp"][-j]==df_dict["targ"][-j] for j in\
+                    comps = [
+                      df_dict["ans"][-j]==df_dict["targ"][-j] for j in\
                             reversed(range(1, len(stats["resp"])+1))
-                    ])
+                    ]
+
+                    correct = np.mean(comps)
                     print(
                         "TokAcc: {} - Correct: {} - {}% - {}s".format(
                             df_dict["tok_acc"][-1].mean(),
@@ -276,6 +278,7 @@ if __name__=="__main__":
         for k in df_dict:
             print(k, "Len:", len(df_dict[k]), "- Examp:", df_dict[k][0])
         df = pd.DataFrame(df_dict)
+        df["pred_str"] = df["pred_str"].astype(str)
         for k,v in hyps.items():
             try:
                 df[k] = v
