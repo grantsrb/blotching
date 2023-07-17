@@ -1281,11 +1281,11 @@ def get_data_cache(math_env,
             soln_strs: list of str
                 the solution strings
     """
-    if max_samples is None: max_samples = init_samples
+    if max_samples is None: max_samples = int(init_samples)
     prob_ids, soln_ids, probs, solns = sample_data(
         math_env,
         tokenizer,
-        n_samples=init_samples,
+        n_samples=int(init_samples),
         max_len=seq_len,
         ret_strings=True,
         held_out_probs=held_out_probs
@@ -1413,6 +1413,27 @@ def get_all_problems(math_env, shuffle=True):
         shuffle: bool
             if true, will return a shuffled list of all possible
             problems, otherwise it is ordered
+    Returns:
+        all_probs: list of str
+    """
+    all_probs = envs.MathEnv.recursive_probs(
+        prob="",
+        n_ents=math_env.max_ents,
+        max_num=math_env.max_num,
+        mult=math_env.p_mult>0,
+        space_mults=math_env.space_mults
+    )
+    if shuffle: np.random.shuffle(all_probs)
+    return all_probs
+
+def get_n_problems(math_env, n_probs):
+    """
+    Returns all possible problems for the given math environment.
+
+    Args:
+        math_env: MathEnv object
+        n_probs: int
+            the number of problems to sample
     Returns:
         all_probs: list of str
     """
