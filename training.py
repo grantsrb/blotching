@@ -92,20 +92,21 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
             )
 
     if not all_problems:
-        # In some cases, we have fewer possible problems than our argued
-        # initial training sample count. So, we first want to collect
-        # all possible problems to make sure that we create an appropriate
-        # data split
-        all_problems = datas.get_all_problems(math_env, shuffle=True)
+        if hyps["max_val"]<400:
+            # In some cases, we have fewer possible problems than our argued
+            # initial training sample count. So, we first want to collect
+            # all possible problems to make sure that we create an appropriate
+            # data split
+            all_problems = datas.get_all_problems(math_env, shuffle=True)
+            val_len = min(int(0.2*len(all_problems)), hyps["val_samples"])
+            train_len = len(all_problems)-val_len
         # Will handle dividing all_problems or 
         val_probs = None
         train_probs = None
-        val_len = min(int(0.2*len(all_problems)), hyps["val_samples"])
-        train_len = len(all_problems)-val_len
 
 
     # This is the case where our total number of problems is small
-    if val_probs or len(all_problems)<hyps["max_samples"]:
+    if val_probs or (all_problems and len(all_problems)<hyps["max_samples"]):
         if verbose and rank==0:
             print("Using all possible data")
         # Handle cases where we've already loaded the validation problsms
@@ -805,6 +806,7 @@ def make_model(hyps):
         except:
             model.arange = checkpt["state_dict"]["arange"]
             model.load_state_dict(checkpt["state_dict"])
+            hyps["max_posencs"] = model.arange.shape[-1]
     return model
 
 def hyper_error_catching(hyps):
