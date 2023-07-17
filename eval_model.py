@@ -54,7 +54,7 @@ if __name__=="__main__":
     rank = 0
     verbose = True
     bsize = 1000 # Determines batch size of evaluation
-    overwrite = True
+    overwrite = False
     testing = False
     max_num = None # override the max_num given by the hyps.
     # Integer argument if you want to randomly sample n problems rather
@@ -107,7 +107,7 @@ if __name__=="__main__":
         except:
             continue
         print(
-            "Evaluating", model_folder,
+            "\nEvaluating", model_folder,
             "-- {}/{}".format(f,len(model_folders))
         )
 
@@ -128,7 +128,13 @@ if __name__=="__main__":
         # Make Tokenizer
         tokenizer = datas.Tokenizer.get_tokenizer(**hyps)
 
-        model = io.load_model(checkpt, globals())
+        try:
+            model = io.load_model(checkpt, globals())
+        except:
+            model = io.load_model(checkpt, globals(), load_sd=False)
+            model.arange = checkpt["state_dict"]["arange"]
+            model.load_state_dict(checkpt["state_dict"])
+            print("state dict successfully loaded")
         model.eval()
         model.cuda()
 
