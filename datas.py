@@ -707,6 +707,8 @@ class Runner:
         pad_mask = inpts==self.tokenizer.pad_idx
         bsize = self.hyps.get("val_batch_size", 100)
         plen = self.prob_len
+        blotch_p = self.hyps.get("bootstrap_blotch_p", 0)
+        if blotch_p == "variable": blotch_p = None
         with torch.no_grad():
             for i in range(0,len(inpts),bsize):
                 startx = i
@@ -719,7 +721,7 @@ class Runner:
                     n_steps=self.shared_exp.shape[1]-inpts.shape[1]-1,
                     temperature=self.hyps.get("temperature", None),
                     incl_all_inpts=True,
-                    blotch_p=self.hyps.get("bootstrap_blotch_p", 0)
+                    blotch_p=blotch_p
                 )
                 logits = ret_dict["preds"]
                 preds = torch.argmax(logits, dim=-1)
@@ -820,6 +822,8 @@ def bootstrap_data(
     pad_mask = inpts==tokenizer.pad_idx
     aranges = torch.arange(hyps["seq_len"]).long()
     aranges = aranges[None].repeat((bsize,1)).to(device)
+    blotch_p = hyps.get("bootstrap_blotch_p", 0)
+    if blotch_p == "variable": blotch_p = None
     with torch.no_grad():
         for i in range(0,len(inpts),bsize):
             startx = i
@@ -832,7 +836,7 @@ def bootstrap_data(
                 n_steps=hyps["seq_len"]-inpts.shape[1]-1,
                 temperature=hyps.get("temperature", None),
                 incl_all_inpts=True,
-                blotch_p=hyps.get("bootstrap_blotch_p", 0)
+                blotch_p=blotch_p
             )
             logits = ret_dict["preds"]
             preds = torch.argmax(logits, dim=-1)
@@ -894,6 +898,7 @@ def axe_data(
     n_loops = hyps.get("axe_loops", 3)
     if n_loops < 0: n_loops = np.inf
     plen = data_cache.prob_len
+    use_perplexity = hyps.get("axe_use_ppl", False)
     device = wrapped_model.model.get_device()
     pad = tokenizer.pad_idx
     eos = tokenizer.eos_idx
@@ -973,7 +978,9 @@ def axe_data(
                     reduce_metrics=False,
                     ret_preds=True,
                 )
-                loss = ret_dict["loss"].to(device)
+                loss = ret_dict["loss"].to(device) # Per Word Loss
+                if use_perplexity:
+                    loss = torch.exp(loss)
 
                 if j==-1:
                     base_loss = loss
@@ -1082,6 +1089,8 @@ def augment_data(
     aranges = torch.arange(data_cache.shape[1])[None].repeat(
         (bsize, 1)
     ).to(device)
+    blotch_p = hyps.get("bootstrap_blotch_p", 0)
+    if blotch_p == "variable": blotch_p = None
     with torch.no_grad():
         perm = torch.randperm(len(data_cache)).long()
         rng = range(min(aug_loops, len(data_cache)//bsize))
@@ -1104,7 +1113,7 @@ def augment_data(
                 n_steps=data_cache.shape[1]-plen-2,
                 incl_all_inpts=True,
                 temperature=hyps.get("temperature", None),
-                blotch_p=hyps.get("bootstrap_blotch_p", 0)
+                blotch_p=blotch_p
             )
             logits = ret_dict["preds"]
             preds = torch.argmax(logits, dim=-1)

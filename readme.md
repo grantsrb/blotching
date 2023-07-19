@@ -76,6 +76,11 @@ then running the following command:
     "axe_tol": float
         the tolerence of the loss difference to decide when to keep
         axings
+    "axe_comp_steps": int
+        the number of steps to compare when axing
+    "axe_use_ppl": bool
+        if true, will use perplexity instead of entropy for evaluating
+        axing samples.
 
     "aug_loops": int
         if greater than 0, will use the model to augment samples in the
