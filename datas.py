@@ -899,6 +899,8 @@ def axe_data(
     if n_loops < 0: n_loops = np.inf
     plen = data_cache.prob_len
     use_perplexity = hyps.get("axe_use_ppl", False)
+    blotch_p = hyps.get("axe_blotch_p", None)
+    if blotch_p is None: blotch_p = hyps.get("bootstrap_blotch_p", 0)
     device = wrapped_model.model.get_device()
     pad = tokenizer.pad_idx
     eos = tokenizer.eos_idx
@@ -944,6 +946,7 @@ def axe_data(
                 prob_len=plen,
                 ret_preds=True,
                 temperature=hyps.get("temperature", None),
+                blotch_p=blotch_p,
             )
             pred_ids = ret_dict["preds"]
             was_correct = utils.vectorized_check_correct(
@@ -977,6 +980,7 @@ def axe_data(
                     prob_len=plen,
                     reduce_metrics=False,
                     ret_preds=True,
+                    blotch_p=blotch_p,
                 )
                 loss = ret_dict["loss"].to(device) # Per Word Loss
                 if use_perplexity:
