@@ -81,6 +81,10 @@ then running the following command:
     "axe_use_ppl": bool
         if true, will use perplexity instead of entropy for evaluating
         axing samples.
+    "axe_blotch_p": float or None
+        the amount of blotching for btoken models during the axing phase.
+        If None, defaults to `bootstrap_blotch_p`. Only applies when
+        using btoken models.
 
     "aug_loops": int
         if greater than 0, will use the model to augment samples in the
