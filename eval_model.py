@@ -10,6 +10,19 @@ Or:
 $ python3 eval_model.py path/to/model_checkpt.pt
 
 """
+
+verbose = True
+bsize = 1000 # Determines batch size of evaluation
+overwrite = False
+testing = False
+max_num = None # override the max_num given by the hyps.
+# Integer argument if you want to randomly sample n problems rather
+# than systematically looking at all possible problems.
+n_samples = 10000 # the number of samples. if None, does all
+use_val_file = False # uses validation data from training. takes
+# priority over use_train_file
+use_train_file = False # overwritten by use_val_file
+
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -51,19 +64,8 @@ def get_stats(tokenizer, ids, remove_padding=True):
 
 
 if __name__=="__main__":
-    rank = 0
-    verbose = True
-    bsize = 1000 # Determines batch size of evaluation
-    overwrite = False
-    testing = False
-    max_num = None # override the max_num given by the hyps.
-    # Integer argument if you want to randomly sample n problems rather
-    # than systematically looking at all possible problems.
-    n_samples = 2000 # the number of samples. if None, does all
-    use_val_file = True # uses validation data from training. takes
-    # priority over use_train_file
-    use_train_file = False # overwritten by use_val_file
 
+    rank = 0
     if testing: print("CURRENTLY IN TESTING MODE!!!!")
 
     model_folders = []
