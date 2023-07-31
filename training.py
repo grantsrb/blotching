@@ -39,6 +39,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     hyps["seed"] = hyps.get("seed", int(time.time()))
     if hyps["seed"] is None: hyps["seed"] = int(time.time())
     torch.manual_seed(hyps["seed"]+rank)
+    np.random.seed(   hyps["seed"]+rank)
 
     hyps["rank"] = rank
 
