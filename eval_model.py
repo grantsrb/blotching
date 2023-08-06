@@ -23,6 +23,15 @@ use_val_file = False # uses validation data from training. takes
 # priority over use_train_file
 use_train_file = False # overwritten by use_val_file
 
+# Env parameters
+# Use None to default to the training distribution
+max_num = None
+max_ents = None
+p_mult = None
+max_mult_num = None
+space_mults = None
+p_ent = None
+
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -83,6 +92,11 @@ if __name__=="__main__":
             use_train_file = True
         elif "val" in arg or "validation" in arg:
             use_val_file = True
+        elif "max_num" in arg: max_num = int(arg.split("=")[-1])
+        elif "max_ents" in arg: max_ents = int(arg.split("=")[-1])
+        elif "p_mult" in arg: p_mult = float(arg.split("=")[-1])
+        elif "max_mult_num" in arg: max_mult_num = int(arg.split("=")[-1])
+        elif "space_mults" in arg: space_mults = bool(arg.split("=")[-1])
         else:
             try:
                 bsize = int(arg)
@@ -96,6 +110,16 @@ if __name__=="__main__":
         results_file = "val_results.csv"
     else:
         results_file = "model_results.csv"
+        if max_num is not None:
+            results_file = "max_num"+str(max_num)+"_"+results_file
+        if max_ents is not None:
+            results_file = "max_ents"+str(max_ents)+"_"+results_file
+        if p_mult is not None:
+            results_file = "p_mult"+str(p_mult)+"_"+results_file
+        if max_mult_num is not None:
+            results_file = "max_mult_num"+str(max_mult_num)+"_"+results_file
+        if space_mults is not None:
+            results_file = "space_mults"+str(space_mults)+"_"+results_file
 
     data_caches = {}
     for f,model_folder in enumerate(model_folders):
@@ -119,6 +143,7 @@ if __name__=="__main__":
         hyps["seed"] = hyps.get("seed", int(time.time()))
         if hyps["seed"] is None: hyps["seed"] = int(time.time())
         torch.manual_seed(hyps["seed"])
+        np.random.seed(hyps["seed"])
         hyps["loss_scale"] = 1./hyps["n_grad_loops"]
         if bsize is not None:
             hyps["batch_size"] = bsize
@@ -126,6 +151,11 @@ if __name__=="__main__":
         hyps["zipf_order"] = 0 # Uniform sampling for validation
 
         # Establish math environment parameters
+        if max_num is not None: hyps["max_num"] = max_num
+        if max_ents is not None: hyps["max_ents"] = max_ents
+        if p_mult is not None: hyps["p_mult"] = p_mult
+        if max_mult_num is not None: hyps["max_mult_num"] = max_mult_num
+        if space_mults is not None: hyps["space_mults"] = space_mults
         math_env = envs.MathEnv(**hyps)
         # Make Tokenizer
         tokenizer = datas.Tokenizer.get_tokenizer(**hyps)
