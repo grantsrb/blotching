@@ -719,7 +719,7 @@ class Runner:
                     is_causal=True,
                     tforce=False,
                     n_steps=self.shared_exp.shape[1]-inpts.shape[1]-1,
-                    temperature=self.hyps.get("temperature", None),
+                    temperature=self.hyps.get("val_temp", None),
                     incl_all_inpts=True,
                     blotch_p=blotch_p
                 )
@@ -834,7 +834,7 @@ def bootstrap_data(
                 is_causal=True,
                 tforce=False,
                 n_steps=hyps["seq_len"]-inpts.shape[1]-1,
-                temperature=hyps.get("temperature", None),
+                temperature=hyps.get("aug_temp", None),
                 incl_all_inpts=True,
                 blotch_p=blotch_p
             )
@@ -945,7 +945,7 @@ def axe_data(
                 no_grad=True,
                 prob_len=plen,
                 ret_preds=True,
-                temperature=hyps.get("temperature", None),
+                temperature=hyps.get("aug_temp", None),
                 blotch_p=blotch_p,
             )
             pred_ids = ret_dict["preds"]
@@ -1116,7 +1116,7 @@ def augment_data(
                 # -2 for the plen+1 in inpts and inclusion of all inpts
                 n_steps=data_cache.shape[1]-plen-2,
                 incl_all_inpts=True,
-                temperature=hyps.get("temperature", None),
+                temperature=hyps.get("aug_temp", None),
                 blotch_p=blotch_p
             )
             logits = ret_dict["preds"]
@@ -1367,7 +1367,6 @@ def get_validation_set(
                                                     loop_count<100:
                 prob = math_env.sample()
                 loop_count += 1
-                if loop_count>=100: n_overlapping += 1
             probs.append(prob)
             prob_set.add(prob)
     else:
@@ -1439,7 +1438,7 @@ def get_all_problems(math_env, shuffle=True):
     if shuffle: np.random.shuffle(all_probs)
     return all_probs
 
-def get_n_problems(math_env, n_probs):
+def get_n_probs(math_env, n_probs, held_out_probs=set()):
     """
     Returns all possible problems for the given math environment.
 
@@ -1447,18 +1446,104 @@ def get_n_problems(math_env, n_probs):
         math_env: MathEnv object
         n_probs: int
             the number of problems to sample
+        held_out_probs: set of str
+            a set of problems to not sample
     Returns:
-        all_probs: list of str
+        probs: list of str
     """
-    all_probs = envs.MathEnv.recursive_probs(
-        prob="",
-        n_ents=math_env.max_ents,
-        max_num=math_env.max_num,
-        mult=math_env.p_mult>0,
-        space_mults=math_env.space_mults
-    )
-    if shuffle: np.random.shuffle(all_probs)
-    return all_probs
+    probs = []
+    prob_set = set()
+    for i in range(n_probs):
+        prob = math_env.sample()
+        loop_count = 0
+        while (prob in held_out_probs or prob in prob_set) and\
+                                                loop_count<100:
+            prob = math_env.sample()
+            loop_count += 1
+        probs.append(prob)
+        prob_set.add(prob)
+    return probs
+
+def get_n_ood_probs(
+        math_env,
+        n_samps,
+        min_num=None,
+        min_mult_num=None,
+        min_ents=None,
+    ):
+    """
+    Returns a list of problems that will contain a non-mult
+    number greater than min_num or a mult with a number greater than
+    min_mult_num or both.
+
+    Args:
+        math_env: MathEnv
+            a math env that is already set with the maximum values.
+        n_samps: int
+            the number of samples to return. will return fewer if
+            impossible or low probability
+        min_num: int or None
+            a number denoting the minimum non-multiplied value that
+            must be included in the problem unless a min_mult_num
+            is included instead. if None, will be ignored, and will
+            focus only on min_mult_num
+        min_mult_num: int or None
+            a number denoting the minimum multiplied value that
+            must be included in the problem unless a min_num
+            is included instead. if None, will be ignored, and will
+            focus only on min_num problems
+        min_ents: int or None
+            the minimum number of entities within the problem. follows
+            same pattern as min_num and min_mult_num
+    Returns:
+        probs: list or str
+            a list of unique problems
+    """
+    if min_num is None: min_num = np.inf
+    if min_mult_num is None: min_mult_num = np.inf
+    if min_ents is None: min_ents = np.inf
+
+    def get_max_mult(prob):
+        splt = prob.split("*")
+        if len(splt)==1: return -np.inf
+        mults = []
+        for i in range(len(splt)):
+            m = splt[i].split("+")
+            m = m[-1] if len(m)>1 else m[0]
+            mults.append(int(m))
+        return max(mults)
+
+    def get_max_num(prob):
+        splt = prob.split("+")
+        if len(splt)==1: return -np.inf
+        nums = []
+        for i in range(len(splt)):
+            n = splt[i]
+            if "*" in n: n = max([int(x) for x in n.split("*")])
+            nums.append(int(n))
+        return max(nums)
+
+    def get_ents(prob):
+        chars = {"+", "*"}
+        n = 0
+        for p in prob:
+            n += int(p in chars)
+            assert p not in {"(", ")"}
+        return n + 1
+
+    probs = []
+    prob_set = set()
+    for i in range(n_samps):
+        prob = math_env.sample()
+        loop_count = 0
+        while (prob in prob_set or (get_max_num(prob)<min_num and\
+                get_max_mult(prob)<min_mult_num and get_ents(prob)<min_ents))\
+                and loop_count<100:
+            prob = math_env.sample()
+            loop_count += 1
+        probs.append(prob)
+        prob_set.add(prob)
+    return probs
 
 def make_data_cache(probs,
                    tokenizer,
@@ -1553,3 +1638,4 @@ def make_data_cache(probs,
     data_cache = DataCache( **kwargs )
     if ret_strings: return data_cache, probs, solns
     return data_cache
+
