@@ -74,11 +74,10 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
     # same training and validation data as before.
     all_problems = None
     if hyps.get("init_checkpt", None):
-        temp_hyps = ml_utils.save_io.get_hyps(hyps["init_checkpt"])
         try:
-            sf = temp_hyps['init_checkpt']
+            sf = hyps['init_checkpt']
             if not os.path.isdir(sf):
-                sf = temp_hyps['save_folder']
+                sf = "/".join(sf.split("/")[:-1])
             with open(os.path.join(sf,"train_probs.txt"),"r") as f:
                 train_probs = [p.strip() for p in f.readlines()]
             with open(os.path.join(sf,"val_probs.txt"),"r") as f:
@@ -334,7 +333,6 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                         "state_dict": model.state_dict(),
                         "optim_dict": optimizer.state_dict(),
                         "hyps": hyps,
-                        "examples": examples,
                     }
                     ep = round(epoch+i/len(data_cache), 3)
                     ml_utils.save_io.save_checkpt(
@@ -416,7 +414,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                             prob_len=val_cache.prob_len,
                             incl_intl_prob=hyps.get("incl_intl_prob", False),
                             blotch_p=bp,
-                            temperature=hyps.get("temperature", None)
+                            temperature=hyps.get("val_temp", None)
                         )
                         loss = package["loss"]
                         acc = package["acc"]
@@ -670,12 +668,15 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     "hyps":        hyps,
                     "examples":    examples,
                 }
+                mod = hyps.get("sd_save_mod", None)
+                keep_prev_sd = mod and epoch%mod==0
                 ml_utils.save_io.save_checkpt(
                     save_dict=save_dict,
                     save_folder=hyps["save_folder"],
                     save_name="checkpt",
                     epoch=epoch,
-                    ext=".pt"
+                    ext=".pt",
+                    del_prev_sd=not keep_prev_sd
                 )
                 save_training_log(hyps, logstr)
             scheduler.step(val_loss)
@@ -802,13 +803,33 @@ def make_model(hyps):
     if init_checkpt is not None and init_checkpt.strip()!="":
         print("Initializing from checkpoint", init_checkpt)
         checkpt = ml_utils.save_io.load_checkpoint(init_checkpt)
-        try:
-            model.load_state_dict(checkpt["state_dict"])
-        except:
-            model.arange = checkpt["state_dict"]["arange"]
-            model.load_state_dict(checkpt["state_dict"])
-            hyps["max_posencs"] = model.arange.shape[-1]
+        if checkpt["hyps"]["model_type"]!=hyps["model_type"]:
+            btok_load_vanilla_sd(model, checkpt["state_dict"])
+        else:
+            try:
+                model.load_state_dict(checkpt["state_dict"])
+            except:
+                model.arange = checkpt["state_dict"]["arange"]
+                model.load_state_dict(checkpt["state_dict"])
+        hyps["max_posencs"] = model.arange.shape[-1]
     return model
+
+def btok_load_vanilla_sd(model, sd):
+    """
+    Loads a vanilla state dict into a btok model.
+    """
+    embs = model.encoder.get_input_embeddings()
+    sd_emb_weight = sd["encoder.model.embed_tokens.weight"]
+    embs.weight.data[:sd_emb_weight.shape[0]] = sd_emb_weight.data
+    sd["encoder.model.embed_tokens.weight"] = embs.weight
+    sd["embeddings.weight"] = embs.weight
+
+    try:
+        model.load_state_dict(sd)
+    except:
+        model.arange = sd["arange"]
+        model.load_state_dict(sd)
+    model.embeddings = model.encoder.get_input_embeddings()
 
 def hyper_error_catching(hyps):
     """
