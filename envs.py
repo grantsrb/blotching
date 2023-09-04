@@ -99,7 +99,8 @@ class MathEnv:
                 maximum entities for the starting problem. If using
                 parentheticals, a parenthetical counts as one entity,
                 parentheticals are recursively samples with max_ents-1
-                max entities.
+                max entities. Otherwise an entity is defined as a
+                single number separated by an operation sign (i.e. +,*)
             p_mult: float [0,1]
                 the probability of sampling a multiplication sign for
                 the starting problem
@@ -279,7 +280,8 @@ class MathEnv:
                 maximum entities for the starting problem. If using
                 parentheticals, a parenthetical counts as one entity,
                 parentheticals are recursively samples with max_ents-1
-                max entities.
+                max entities. Otherwise an entity is defined as a
+                single number separated by an operation sign (i.e. +,*)
             p_mult: float [0,1]
                 the probability of sampling a multiplication sign for
                 the starting problem
@@ -320,7 +322,7 @@ class MathEnv:
         if max_mult_num is None: max_mult_num = max_num
         break_i = max_ents
         for i in range(max_ents):
-            # 50% prob of not including more terms
+            # prob of not including more entities
             if i > 1 and np.random.random() > p_ent: continue
             if i > 0:
                 high_num = max_num
