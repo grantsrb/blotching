@@ -19,8 +19,9 @@ max_num = None # override the max_num given by the hyps.
 # Integer argument if you want to randomly sample n problems rather
 # than systematically looking at all possible problems.
 n_samples = 10000 # the number of samples. if None, does all
-use_val_file = False # uses validation data from training. takes
+# uses validation data from training. takes
 # priority over use_train_file
+use_val_file = True # Highest priority
 use_train_file = False # overwritten by use_val_file
 
 # Env parameters
