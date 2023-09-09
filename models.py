@@ -170,9 +170,16 @@ class Model(torch.nn.Module):
         return blotch_ids
 
     def sample_with_temperature(self, logits, temperature):
+        """
+        Args:
+            logits: torch float tensor (..., L)
+            temperature: float or None
+                a value to increase the sampling entropy. ignored if
+                0 or None
+        """
         if not temperature: return torch.argmax(logits, dim=-1)
         ps = torch.nn.functional.softmax( logits/temperature, dim=-1 )
-        return torch.multinomial(ps, num_samples=1)
+        return torch.multinomial(ps, num_samples=1)[...,0]
 
     def init_weights(self) -> None:
         initrange = 0.1
@@ -689,7 +696,6 @@ class HFModel(Model):
         Returns:
             output Tensor of shape ``[bsize, seq_len+n_steps, n_tokens]``
         """
-
         B,S = src.shape
         n_loops = n_steps + 1
 
@@ -1133,7 +1139,8 @@ class LossWrapper(torch.nn.Module):
                 tforce=tforce,
                 blotch_p=blotch_p,
                 tok_drop_p=tok_drop_p,
-                tokenizer=self.tokenizer
+                tokenizer=self.tokenizer,
+                temperature=temperature,
             )
             preds = ret_dict["preds"]
             if "blotch_mask" in ret_dict:
@@ -1161,7 +1168,8 @@ class LossWrapper(torch.nn.Module):
                 incl_all_inpts=incl_all_inpts,
                 blotch_p=blotch_p,
                 tok_drop_p=tok_drop_p,
-                tokenizer=self.tokenizer
+                tokenizer=self.tokenizer,
+                temperature=temperature,
             )
             preds = ret_dict["preds"]
             #print(
