@@ -23,6 +23,7 @@ n_samples = 10000 # the number of samples. if None, does all
 # priority over use_train_file
 use_val_file = True # Highest priority
 use_train_file = False # overwritten by use_val_file
+temperature = 0.1
 
 # Env parameters
 # Use None to default to the training distribution
@@ -98,6 +99,7 @@ if __name__=="__main__":
         elif "p_mult" in arg: p_mult = float(arg.split("=")[-1])
         elif "max_mult_num" in arg: max_mult_num = int(arg.split("=")[-1])
         elif "space_mults" in arg: space_mults = bool(arg.split("=")[-1])
+        elif "temperature" in arg: temperature = float(arg.split("=")[-1])
         else:
             try:
                 bsize = int(arg)
@@ -270,6 +272,7 @@ if __name__=="__main__":
                         no_grad=True,
                         incl_all_inpts=True,
                         blotch_p=blotch_p,
+                        temperature=temperature,
                     )
                     pred_ids = package["preds"]
 
