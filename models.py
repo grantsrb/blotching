@@ -1075,6 +1075,7 @@ class LossWrapper(torch.nn.Module):
         self.model = model
         self.tokenizer = tokenizer
         self.hyps = hyps
+        self.label_smoothing = hyps.get("label_smoothing", 0)
         self.loss_scale = 1./self.hyps.get("n_grad_loops",1)
         self.loss_fxn = torch.nn.functional.cross_entropy
         self.grad_clip = self.hyps.get("grad_clip", 10)
@@ -1241,7 +1242,9 @@ class LossWrapper(torch.nn.Module):
         reduction = "mean" if reduce_metrics else "none"
         try:
             loss = self.loss_scale*self.loss_fxn(
-                ps,labels,reduction=reduction
+                ps,labels,
+                reduction=reduction,
+                label_smoothing=self.label_smoothing
             )
         except:
             for i in range(len(data["input_ids"])):
@@ -1319,7 +1322,14 @@ class LossWrapper(torch.nn.Module):
                 ret_dict["preds"][...,:prob_len] = ids
         return ret_dict
 
-def loss_and_acc(preds, labels, attn, loss_fxn, loss_scale=1,top_k=None):
+def loss_and_acc(preds,
+        labels,
+        attn,
+        loss_fxn,
+        loss_scale=1,
+        top_k=None,
+        label_smoothing=0,
+    ):
     """
     preds: torch float tensor (B,S,L)
         prediction logits
@@ -1345,7 +1355,10 @@ def loss_and_acc(preds, labels, attn, loss_fxn, loss_scale=1,top_k=None):
         idx = attn.bool().reshape(-1).to(device)
     argmax = torch.argmax(ps[idx], dim=-1)
     ret_dict = {
-        "loss": loss_fxn(ps[idx],labels[idx])*loss_scale,
+        "loss": loss_fxn(
+                    ps[idx],labels[idx],
+                    label_smoothing=label_smoothing
+                )*loss_scale,
         "acc": (argmax==labels[idx]).float().mean(),
         "top_k": torch.zeros(1),
     }
