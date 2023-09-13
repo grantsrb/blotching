@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
+import utils
 from utils import get_blotch_mask, get_pos_ids, get_tok_mask
 import ml_utils
 import math
@@ -14,6 +15,7 @@ from transformers import (
     OpenAIGPTConfig,
     GPTJConfig,
     LlamaConfig,
+    TransfoXLConfig,
 )
 
 DEVICES = {
@@ -44,6 +46,7 @@ class Model(torch.nn.Module):
                        scale_by_inv_layer:bool=True,
                        reorder_and_upcast:bool=False,
                        hf_model_type:str="gpt2",
+                       excise_tokens:bool=False,
                        *args, **kwargs):
         """
         n_tokens: int
@@ -101,6 +104,10 @@ class Model(torch.nn.Module):
         hf_model_type: str
             the huggingface transformer base. only applies if using
             HFModel types. Specifies the hf model base type.
+        excise_tokens: bool
+            if true, instead of rearranging the positional encoding
+            ids, the blotched tokens will actually be removed from
+            the input. This makes it easier to use relative encodings.
         scale_attn_weights: bool
             scale attention weights by dividing by sqrt(hidden_size)
         scale_by_inv_layer: bool
@@ -146,6 +153,7 @@ class Model(torch.nn.Module):
         self.scale_attn_weights = scale_attn_weights
         self.scale_by_inv_layer = scale_by_inv_layer
         self.reorder_and_upcast = reorder_and_upcast
+        self.excise_tokens = excise_tokens
 
     def get_device(self):
         return DEVICES[next(self.parameters()).get_device()]
@@ -628,6 +636,8 @@ class HFModel(Model):
             config = GPTJConfig()
         elif self.hf_model_type == "llama":
             config = LlamaConfig()
+        elif self.hf_model_type == "transxl":
+            config = TransfoXLConfig()
         config.update(config_kwargs)
         return config
 
@@ -649,14 +659,32 @@ class HFModel(Model):
             output Tensor of shape ``[bsize, seq_len, n_tokens]``
         """
         pmask = ~(pad_mask.bool())
-        pos_ids = get_pos_ids(
-            pmask, arange=self.arange, pad_pos_skip=self.pad_pos_skip
-        )
+        # Actually removes the tokens at the pad_mask locations
+        if self.excise_tokens:
+            old_mask = pad_mask
+            pad_id = src[0][pad_mask[0]].reshape(-1)[0].item()
+            src,new_mask = utils.excise_tokens(
+                src, ~pad_mask.bool(), pad_id=pad_id
+            )
+            pad_mask = src==pad_id
+            pos_ids = None
+        # Changes the pos_ids to make it seem like the tokens at the
+        # pad_mask locations have been removed
+        else:
+            pos_ids = get_pos_ids(
+                pmask, arange=self.arange, pad_pos_skip=self.pad_pos_skip
+            )
         output = self.encoder(
             src,
             attention_mask=pmask,
             position_ids=pos_ids,
         )
+        # Need to put the tokens back in the correct place for integration
+        # with the loss functions
+        if self.excise_tokens:
+            output.logits = utils.reverse_excision(
+                output.logits, new_mask, old_mask
+            )
         return { "preds": output.logits }
 
     def freedom_fwd(self, src:torch.Tensor,
@@ -684,7 +712,7 @@ class HFModel(Model):
                 if true, will include all input tokens in the output
                 prediction tensor. otherwise only includes "predicted
                 spaces". "predicted spaces" includes the shifted initial
-                inputs.  This is useful to save a concatenation during
+                inputs. This is useful to save a concatenation during
                 the data bootstrapping phase.
             pad_pos_skip: bool
                 if true, will skip over masked tokens when applying
@@ -738,7 +766,7 @@ class HFModel(Model):
                 ids[:,S+step] = argmaxs
                 inpt = ids[:,S+step:S+step+1]
                 pids = pos_ids[:,S+step:S+step+1]
-        return {"preds": preds}
+        return { "preds": preds }
 
 
 class HFBlotchModel(HFModel):

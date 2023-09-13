@@ -340,8 +340,63 @@ def get_pos_ids(mask, arange=None, pad_pos_skip=True):
     pos_ids[mask.bool()] = rep[rep<mask_sums[:,None]]
     return pos_ids
 
+def excise_tokens(src, mask, pad_id=0, pad_left=False):
+    """
+    Will create a new tensor that makes all masked ids along
+    the last dimension contiguous.
+
+    Args:
+        src: torch long tensor  (B, S)
+        mask: torch bool tensor (B, S)
+            will excise tokens where mask is 0. keeps tokens where mask
+            is 1
+        pad_left: bool
+            will determine whether to pad the final contiguous outputs
+            on the left or on the right
+    Returns:
+        contig: torch long tensor (B S)
+    """
+    device = mask.get_device()
+    if device<0: device = "cpu"
+    B,S = src.shape
+    contig = torch.zeros_like(src) + pad_id
+    if pad_left:
+        cmask = torch.arange(S-1, -1, -1)
+    else:
+        cmask = torch.arange(S)
+    cmask = cmask[None].repeat((B,1)).long().to(device)
+    cmask = cmask<mask.float().sum(-1)[..., None]
+    contig[cmask] = src[mask.bool()]
+    return contig, ~cmask
+
+def reverse_excision(logits, cur_mask, old_mask):
+    """
+    Reverses the excision operation by placing the logits back where
+    they were before. It does not place the excised tokens back in
+    place though. 
+
+    Args:
+        logits: torch tensor (B,S,L)
+        cur_mask: torch bool tensor (B,S)
+            the current pad mask where 1 means padding
+        old_mask: torch bool tensor (B,S)
+            the old pad mask where 1 means padding
+    Returns:
+        logits: torch tensor (B,S,L)
+            the rearranged logits based on the old mask
+    """
+    B,S = old_mask.shape
+    og_logits = torch.zeros_like(logits)
+    og_logits[~old_mask.bool()] = logits[~cur_mask.bool()]
+    return og_logits
+
 if __name__=="__main__":
-    mask = torch.randint(0,2, (1,300))
-    print("Mask  :", mask.tolist()[0][200:])
-    pos_ids = get_pos_ids(mask, arange=torch.arange(250))
-    print("PosIDs:", pos_ids.tolist()[0][200:])
+    mask = torch.randint(0,2, (2,5))
+    src = torch.arange(5,0, -1)[None].repeat((2,1))
+    print("Src   :", src)
+    print("Mask  :", mask)
+    contig,new_mask = excise_tokens(src, ~mask.bool(), pad_left=True)
+
+    print("Contig:", contig)
+    rev = reverse_excision(contig, new_mask, mask.bool())
+    print("Revers:", rev)
