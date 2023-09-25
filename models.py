@@ -2,6 +2,7 @@ from torch import Tensor
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.optim.lr_scheduler import _LRScheduler
 import numpy as np
 import utils
 from utils import get_blotch_mask, get_pos_ids, get_tok_mask
@@ -30,6 +31,7 @@ class Model(torch.nn.Module):
                        n_layers:int=3,
                        posenc_type:str="SinPositionalEncoding",
                        norm_first:bool=True,
+                       blotch_spacing:str="random",
                        blotch_p:float=0.3,
                        blotch_p_min:float=None,
                        blotch_p_max:float=None,
@@ -47,6 +49,7 @@ class Model(torch.nn.Module):
                        reorder_and_upcast:bool=False,
                        hf_model_type:str="gpt2",
                        excise_tokens:bool=False,
+                       pretrained:bool=False,
                        *args, **kwargs):
         """
         n_tokens: int
@@ -67,6 +70,19 @@ class Model(torch.nn.Module):
             if true, applies layer norm before the operations in the
             encoder layer (this seemed to be better in some paper I
             can't remember the name of)
+        blotch_spacing: str
+            an argument to decide how the blotching will be spaced.
+            possible arguments are the following:
+                "random": blotching is random according to the blotching
+                    probability
+                "equal": the blotching is semi-deterministicly
+                    distributed relatively equally amongst the possible
+                    segments.  The number of blotched segments is decided
+                    by `blotch_p * <num possible segments>` where the
+                    rounding direction is decided randomly using a
+                    probability equal to the remaining fraction. So,
+                    there's still some stochasticity but it's lower
+                    variance and deterministic in many cases.
         blotch_p: float
             the blotch probability. 0 means no blotching.
         blotch_p_min: float
@@ -115,6 +131,9 @@ class Model(torch.nn.Module):
             huggingface docs for details
         reorder_and_upcast: bool
             reorder and upcast attention. see huggingface docs for details
+        pretrained: bool
+            if true, will ignore model specs and use a pretrained
+            huggingface model. only applies if using HF model types.
         """
         super().__init__()
         self.n_tokens = n_tokens
@@ -122,6 +141,7 @@ class Model(torch.nn.Module):
         self.n_heads = n_heads
         self.h_mult = h_mult
         self.n_layers = n_layers
+        self.bp_spacing = blotch_spacing
         self.blotch_p = blotch_p
         self.tok_drop_p = tok_drop_p
         self.bp_min = blotch_p_min
@@ -129,16 +149,21 @@ class Model(torch.nn.Module):
         self.bp_max = blotch_p_max
         if blotch_p_max is None: self.bp_max = blotch_p
         self.bp_diff = self.bp_max - self.bp_min
-        self.n_btokens = n_btokens
-        if n_btokens is None:
+        self.n_btokens = n_btokens if self.bp_diff>0 else None
+        if self.n_btokens is None:
             self.bp_gran = 11 # the granularity of the blotch p
             # the blotch token values will be divided by this value
             # to determine the actual blotch p
             self.n_btokens = max(int(self.bp_diff*self.bp_gran), 1)
-            print("Num Blotch Tokens:", self.n_btokens)
         else:
             assert self.bp_diff>0
             self.bp_gran = self.n_btokens/self.bp_diff
+        print("Num Blotch Tokens:", self.n_btokens)
+        if self.n_btokens:
+            print(
+                "Possible Blotch Ps:",
+                torch.arange(self.n_btokens)/self.bp_gran
+            )
         self.drop_p = drop_p
         self.posenc_type = posenc_type
         self.norm_first = norm_first
@@ -154,6 +179,7 @@ class Model(torch.nn.Module):
         self.scale_by_inv_layer = scale_by_inv_layer
         self.reorder_and_upcast = reorder_and_upcast
         self.excise_tokens = excise_tokens
+        self.pretrained = pretrained
 
     def get_device(self):
         return DEVICES[next(self.parameters()).get_device()]
@@ -252,6 +278,7 @@ class Model(torch.nn.Module):
                     src,
                     sep_idx=self.sep_idx,
                     blotch_p=blotch_p,
+                    spacing=self.bp_spacing,
                 )
                 pad_mask = pad_mask|blotch_mask
             if (self.tok_drop_p and self.training) or tok_drop_p:
@@ -527,6 +554,7 @@ class BlotchTokenModel(TransformerModel):
                 src,
                 sep_idx=self.sep_idx,
                 blotch_p=blotch_p,
+                spacing=self.bp_spacing,
             )
             pad_mask = pad_mask|blotch_mask.to(DEVICES[pad_mask.get_device()])
 
@@ -580,17 +608,30 @@ class HFModel(Model):
         super().__init__(*args, **kwargs)
         self.model_type = 'Transformer'
 
-        config = self.get_config()
-        self.encoder = AutoModelForCausalLM.from_config(config)
+        if self.pretrained:
+            self.encoder = AutoModelForCausalLM.from_pretrained(
+                self.hf_model_type
+            )
+            print("Properties:")
+            for name in dir(self.encoder):
+                print(name)
+            embeddings = self.encoder.get_input_embeddings()
+            self.d_model = embeddings.weight.shape[-1]
+            print(self.encoder)
+            self.embeddings = torch.nn.Embedding(
+                self.n_tokens,self.d_model
+            )
+        else:
+            config = self.get_config()
+            self.encoder = AutoModelForCausalLM.from_config(config)
+            if hasattr(self.encoder, "transformer"):
+                if hasattr(self.encoder.transformer, "wpe"):
+                    wpe = self.encoder.transformer.wpe
+                    for name, p in wpe.named_parameters():
+                        print("Turning off gradients for", name)
+                        p.requires_grad = self.learn_posencs
+            self.embeddings = self.encoder.get_input_embeddings()
 
-        if hasattr(self.encoder, "transformer"):
-            if hasattr(self.encoder.transformer, "wpe"):
-                wpe = self.encoder.transformer.wpe
-                for name, p in wpe.named_parameters():
-                    print("Turning off gradients for", name)
-                    p.requires_grad = self.learn_posencs
-
-        self.embeddings = self.encoder.get_input_embeddings()
         self.decoder = nn.Linear( self.d_model, self.n_tokens )
         self.encoder.lm_head = self.decoder
 
@@ -852,6 +893,7 @@ class HFBlotchModel(HFModel):
                 src,
                 sep_idx=self.sep_idx,
                 blotch_p=blotch_p,
+                spacing=self.bp_spacing,
             )
             pad_mask = pad_mask|blotch_mask.to(DEVICES[pad_mask.get_device()])
 
@@ -1367,6 +1409,87 @@ def loss_and_acc(preds,
             ps[idx], labels[idx], top_k, as_tensor=True
         )
     return ret_dict
+
+class DecayScheduler(_LRScheduler):
+    """
+    Code adapted from https://kikaben.com/transformers-training-details/
+    to have a more flexible decay rate and relationship between
+    warmup steps and the maximum learning rate.
+    """
+    @staticmethod
+    def calc_lr(step,
+            d_model,
+            warmup_steps,
+            max_lr=0.005,
+            min_lr=1e-7,
+            decay_exp=0.5,
+        ):
+        """
+        Args:
+            d_model: int
+                the size of the latent vectors of the model
+            warmup_steps: int
+            min_lr: float
+                sets a lower bound on the learning rate. the lr will
+                never drop below this value
+            max_lr: float
+                the maximum learning rate. This learning rate will
+                be returned at the end of the warmup.
+            decay_exp: float
+                an exponent dictating the rate of decay of the learning
+                rate following the warmup.
+        """
+        size_factor = d_model**(-0.5)
+        scale = max_lr/(size_factor*warmup_steps**(-decay_exp))
+        warmup = scale * step * warmup_steps**(-(1+decay_exp))
+        reg = np.maximum(scale*step**(-decay_exp), min_lr)
+        return size_factor * np.minimum(reg, warmup)
+
+    def __init__(self, 
+                 optimizer,
+                 d_model: int,
+                 warmup_steps: int=100,
+                 last_epoch: int=-1,
+                 verbose: bool=False,
+                 min_lr: float=1e-10,
+                 lr: float=1,
+                 lr_decay_exp=0.25,
+                 *args, **kwargs) -> None:
+        """
+        Args:
+            d_model: int
+                the size of the latent vectors of the model
+            warmup_steps: int
+            min_lr: float
+                sets a lower bound on the learning rate. the lr will
+                never drop below this value
+            lr: float
+                the maximum learning rate. This learning rate will
+                be returned at the end of the warmup.
+            lr_decay_exp: float
+                an exponent dictating the rate of decay of the learning
+                rate following the warmup.
+        """
+        self.max_lr = lr
+        self.min_lr = min_lr
+        self.d_model = d_model
+        self.warmup_steps = warmup_steps
+        self.lr_decay_exp = lr_decay_exp
+        self.num_param_groups = len(optimizer.param_groups)
+        super().__init__(optimizer, last_epoch, verbose)
+
+    def get_lr(self) -> float:
+        lr = DecayScheduler.calc_lr(
+            self._step_count,
+            d_model=self.d_model,
+            warmup_steps=self.warmup_steps,
+            max_lr=self.max_lr,
+            min_lr=self.min_lr,
+            decay_exp=self.lr_decay_exp,
+        )
+        return [float(lr)] * self.num_param_groups
+
+
 
 if __name__=="__main__":
     #def blotch(idxs, sep_idx, blotch_p=0.4, indy_blotching=False):
