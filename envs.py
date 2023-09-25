@@ -132,12 +132,13 @@ class MathEnv:
                 x happens to be sampled as less than or equal to
                 max_mult_num, then y will be sampled from [0,max_num]
         """
-        self.max_num = max_num
-        self.max_ents = max_ents
-        self.p_mult = p_mult
+        self.max_num = int(max_num)
+        self.max_ents = int(max_ents)
+        self.p_mult = float(p_mult)
         self.max_mult_num = max_mult_num
         if max_mult_num is None: self.max_mult_num = self.max_num
-        self.p_paren = p_paren
+        self.max_mult_num = int(self.max_mult_num)
+        self.p_paren = float(p_paren)
         assert p_paren==0, "Parentheses are not yet implemented"
         self.space_mults = space_mults
         self.zipf_order = zipf_order
