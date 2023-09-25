@@ -166,7 +166,8 @@ then running the following command:
     "batch_size": int
         the size of batches for stochastic gradient descent
     "lr": float
-        the learning rate
+        the learning rate. also sets the maximum learning rate in
+        schedulers with decay and warmup.
     "l2": float
         the l2 norm regularization. aka weight decay
     "seq_len": int
@@ -212,6 +213,14 @@ then running the following command:
 
     "model_type": str
         the class name of the model architecture
+    "hf_model_type": str ("gpt2", "gptj", "llama")
+        if using huggingface model types, can argue the string name
+        of the model type you would like to use.
+    "pretrained": bool
+        if true, will ignore model configuration parameters and use
+        the pretrained version of the huggingface model type. only
+        applies when using hf model types.
+
     "digit_embs": bool
         if true, all numbers consist of individual digit embeddings.
         false is not currently implemented.
@@ -246,4 +255,42 @@ then running the following command:
         be equivalent to stepping the optimizer once per iteration with
         a batch size of batch_size*n_grad_loops
 
-    
+    "label_smoothing": float
+        a value from 0-1 to apply label smoothing to the loss
+    "plateau_scheduler": bool
+        if true, the learning rate is scheduled to decrease on performance
+        plateaus. Otherwise uses a warm up (see `warmup_steps`) and
+        then proceeds to decay to a minimum learning rate set by
+        `min_lr`
+    "warmup_steps": int
+        the number of training steps (not epochs) to warmup the learning
+        rate from 0 to max(lr*1/sqrt(step num), `min_lr`)
+    "min_lr": float
+        the minimum possible learning rate
+    "lr_decay_exp": float
+        the exponent dictating the rate of decay of the learning rate
+        after the warmup steps.
+
+    "blotch_spacing": str, one of ["random", "equal"]
+        optionally pick how the blotching occurs with the following
+        options:
+
+        "random": blotching is random according to the blotching probability
+        "equal": the blotching is semi-deterministicly
+                    distributed relatively equally amongst the possible
+                    segments.  The number of blotched segments is decided
+                    by `blotch_p * <num possible segments>` where the
+                    rounding direction is decided randomly using a
+                    probability equal to the remaining fraction. So,
+                    there's still some stochasticity but it's lower
+                    variance and deterministic in many cases.
+        Not Implemented:
+            "random_equal": the blotching is mostly spaced equally except
+                that each equally spaced blotch segment has an equal
+                probability of being located at the segment before or after
+                the equally spaced segement. i.e. there is 2/3 probability
+                that instead of blotching the segment chosen by equal
+                spacing, we instead blotch the segment immediately before
+                or after with equal probability.
+        
+        
