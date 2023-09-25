@@ -123,7 +123,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         )
         hyps["seq_len"] = val_cache.seq_len
         hyps["prob_len"] = val_cache.prob_len
-        init_samps = hyps.get("init_samples", hyps["max_samples"])
+        init_samps = int(hyps.get("init_samples", hyps["max_samples"]))
         # Handle cases where we've already loaded the training problems
         if not train_probs:
             end = len(all_problems)
@@ -229,9 +229,12 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
         lr=lr,
         weight_decay=l2
     )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, threshold=0.001, patience=hyps.get("patience",10)
-    )
+    if hyps.get("plateau_scheduler", True):
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, threshold=0.001, patience=hyps.get("patience",10)
+        )
+    else:
+        scheduler = models.DecayScheduler( optimizer, **hyps )
 
     if hyps["multi_gpu"]:
       if rank==0 and verbose: print("Putting model on multiple GPUs")
@@ -303,6 +306,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     )
                 optimizer.step()
                 optimizer.zero_grad()
+                if not hyps.get("plateau_scheduler", True):
+                    scheduler.step()
 
             if verbose and i%10==0 and rank==0:
                 dec = 4
@@ -313,6 +318,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                 s = "Loss: {} -Acc: {}".format(l,a)
                 s += " - {}% {}s   ".format(c,t)
                 print(s, end=int(len(s)/2)*" " + "\r")
+
+
             if hyps["exp_name"]=="test" and i>=30: break
             if i>=(nloops-1): break
             if i>0 and checkpt_mod and i%checkpt_mod==0 and rank==0:
@@ -332,6 +339,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                         "val_acc":  None,
                         "state_dict": model.state_dict(),
                         "optim_dict": optimizer.state_dict(),
+                        "lr": optimizer.param_groups[0]["lr"],
                         "hyps": hyps,
                     }
                     ep = round(epoch+i/len(data_cache), 3)
@@ -665,6 +673,7 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     "n_axed_samps": n_axed_samps,
                     "state_dict":  model.state_dict(),
                     "optim_dict":  optimizer.state_dict(),
+                    "lr": optimizer.param_groups[0]["lr"],
                     "hyps":        hyps,
                     "examples":    examples,
                 }
@@ -679,7 +688,8 @@ def train(rank, hyps, verbose=True, *args, **kwargs):
                     del_prev_sd=not keep_prev_sd
                 )
                 save_training_log(hyps, logstr)
-            scheduler.step(val_loss)
+            if hyps.get("plateau_scheduler", True):
+                scheduler.step(val_loss)
 
         if rank==0 and verbose:
             print("Total Training Samples:", len(data_cache))
