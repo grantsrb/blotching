@@ -23,7 +23,7 @@ n_samples = 10000 # the number of samples. if None, does all
 # priority over use_train_file
 use_val_file = True # Highest priority
 use_train_file = False # overwritten by use_val_file
-temperature = 0.1
+temperature = 0.5
 
 # Env parameters
 # Use None to default to the training distribution
@@ -106,6 +106,7 @@ if __name__=="__main__":
             except:
                 print("Unrecognized arg", arg)
     if overwrite: print("Overwriting!!!")
+    print("Temperature:", temperature)
 
     if use_train_file:
         results_file = "train_results.csv"
@@ -128,8 +129,10 @@ if __name__=="__main__":
     for f,model_folder in enumerate(model_folders):
         csv_path = os.path.join(model_folder, results_file)
         if not testing and not overwrite and os.path.exists(csv_path):
-            print(csv_path, "already exists, skipping....")
-            continue
+            og_df = pd.read_csv(csv_path)
+            if np.any(og_df["val_temp"]==temperature):
+                print(csv_path, "already exists, skipping....")
+                continue
         try:
             checkpt = io.load_checkpoint(model_folder)
             hyps = checkpt["hyps"]
@@ -325,6 +328,7 @@ if __name__=="__main__":
             try:
                 df[k] = v
             except: print("error for", k)
+        df["val_temp"] = temperature
         print()
         print("Avg Token Acc:", (df["tok_acc"]).mean())
         print("Avg Correct:", (df["ans"]==df["targ"]).mean())
