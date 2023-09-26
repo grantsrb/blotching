@@ -142,6 +142,7 @@ if __name__=="__main__":
             "\nEvaluating", model_folder,
             "-- {}/{}".format(f,len(model_folders))
         )
+        print("Temperature:", temperature)
 
         if "model_string" in hyps:
             hyps["model_type"] = hyps["model_string"]
@@ -236,87 +237,97 @@ if __name__=="__main__":
             print("Total Samples:", len(data_cache))
 
         loss_fxn = torch.nn.CrossEntropyLoss()
-        df_dict = {
-            "tok_acc":  [],
-            "ans": [],
-            "targ": [],
-            "pred_str": [],
-            "prob_str": [],
-            "soln_str": [],
-            "label_str": [],
-            "b_p": [],
-        }
-        plen = data_cache.prob_len
-        if verbose and rank==0: print("Evaluating Model")
-        n_loops = len(iter(data_cache))
-        wrapped_model.eval()
-        model.eval()
-        if hyps["model_type"]=="TransformerModel":
-            bps = [0.0]
-        else:
-            bps = np.arange(max(model.n_btokens,1))/model.bp_gran
-        for blotch_p in bps:
-            print("\nBp:", blotch_p)
-            for i,data in enumerate(data_cache):
-                start_time = time.time()
-                if "meta_data" in data:
-                    meta_data = data["meta_data"]
-                if not hyps["model_parallel"]:
-                    data["input_ids"] = data["input_ids"].to(rank)
-                    data["output_ids"] = data["output_ids"].to(rank)
-                with torch.no_grad():
 
-                    package = wrapped_model(
-                        data,
-                        ret_preds=True,
-                        seq_len=hyps["seq_len"],
-                        tforce=False,
-                        prob_len=plen,
-                        no_grad=True,
-                        incl_all_inpts=True,
-                        blotch_p=blotch_p,
-                        temperature=temperature,
-                    )
-                    pred_ids = package["preds"]
+        mem_error = True
+        while mem_error:
+            mem_error = False #pythondontfuxwitdowhileloops
+            df_dict = {
+                "tok_acc":  [],
+                "ans": [],
+                "targ": [],
+                "pred_str": [],
+                "prob_str": [],
+                "soln_str": [],
+                "label_str": [],
+                "b_p": [],
+            }
+            plen = data_cache.prob_len
+            if verbose and rank==0: print("Evaluating Model")
+            n_loops = len(iter(data_cache))
+            wrapped_model.eval()
+            model.eval()
+            if hyps["model_type"]=="TransformerModel":
+                bps = [0.0]
+            else:
+                bps = np.arange(max(model.n_btokens,1))/model.bp_gran
+            try:
+                for blotch_p in bps:
+                    print("\nBp:", blotch_p)
+                    for i,data in enumerate(data_cache):
+                        start_time = time.time()
+                        if "meta_data" in data:
+                            meta_data = data["meta_data"]
+                        if not hyps["model_parallel"]:
+                            data["input_ids"] = data["input_ids"].to(rank)
+                            data["output_ids"] = data["output_ids"].to(rank)
+                        with torch.no_grad():
 
-                    probs =   meta_data["probs"]
-                    solns =   meta_data["solns"]
-                    labels =  meta_data["labels"]
-                    for prob,soln,label in zip(probs, solns,labels):
-                        df_dict["targ"].append(
-                         soln.split(tokenizer.eos)[0].split(tokenizer.sep)[-1]
-                        )
-                        df_dict["soln_str"].append(soln[1:]) # removes =
-                        df_dict["prob_str"].append(prob)
-                        df_dict["label_str"].append(label)
-                        df_dict["b_p"].append(blotch_p)
+                            package = wrapped_model(
+                                data,
+                                ret_preds=True,
+                                seq_len=hyps["seq_len"],
+                                tforce=False,
+                                prob_len=plen,
+                                no_grad=True,
+                                incl_all_inpts=True,
+                                blotch_p=blotch_p,
+                                temperature=temperature,
+                            )
+                            pred_ids = package["preds"]
 
-                    stats = get_stats(tokenizer=tokenizer, ids=pred_ids)
-                    df_dict["ans"]      += stats["resp"]
-                    df_dict["pred_str"] += stats["pred"]
+                            probs =   meta_data["probs"]
+                            solns =   meta_data["solns"]
+                            labels =  meta_data["labels"]
+                            for prob,soln,label in zip(probs, solns,labels):
+                                df_dict["targ"].append(
+                                 soln.split(tokenizer.eos)[0].split(tokenizer.sep)[-1]
+                                )
+                                df_dict["soln_str"].append(soln[1:]) # removes =
+                                df_dict["prob_str"].append(prob)
+                                df_dict["label_str"].append(label)
+                                df_dict["b_p"].append(blotch_p)
 
-                    out_ids = data["output_ids"][:,plen:]
-                    acc = pred_ids[:,plen+1:]==out_ids
-                    out_pad_mask = out_ids==tokenizer.pad_idx
-                    acc[out_pad_mask] = 0
-                    acc = acc.float().sum(-1)
-                    acc = acc / (~out_pad_mask).sum(-1)
-                    df_dict["tok_acc"].append(acc.cpu().data.numpy())
-                    comps = [
-                      df_dict["ans"][-j]==df_dict["targ"][-j] for j in\
-                            reversed(range(1, len(stats["resp"])+1))
-                    ]
+                            stats = get_stats(tokenizer=tokenizer, ids=pred_ids)
+                            df_dict["ans"]      += stats["resp"]
+                            df_dict["pred_str"] += stats["pred"]
 
-                    correct = np.mean(comps)
-                    print(
-                        "TokAcc: {} - Correct: {} - {}% - {}s".format(
-                            df_dict["tok_acc"][-1].mean(),
-                            correct,
-                            int((i+1)/n_loops*100),
-                            round(time.time()-start_time, 2)
-                        ),
-                        end="                  \r"
-                    )
+                            out_ids = data["output_ids"][:,plen:]
+                            acc = pred_ids[:,plen+1:]==out_ids
+                            out_pad_mask = out_ids==tokenizer.pad_idx
+                            acc[out_pad_mask] = 0
+                            acc = acc.float().sum(-1)
+                            acc = acc / (~out_pad_mask).sum(-1)
+                            df_dict["tok_acc"].append(acc.cpu().data.numpy())
+                            comps = [
+                              df_dict["ans"][-j]==df_dict["targ"][-j] for j in\
+                                    reversed(range(1, len(stats["resp"])+1))
+                            ]
+
+                            correct = np.mean(comps)
+                            print(
+                                "TokAcc: {} - Correct: {} - {}% - {}s".format(
+                                    df_dict["tok_acc"][-1].mean(),
+                                    correct,
+                                    int((i+1)/n_loops*100),
+                                    round(time.time()-start_time, 2)
+                                ),
+                                end="                  \r"
+                            )
+            except torch.cuda.OutOfMemoryError:
+                mem_error = True
+                data_cache.batch_size = data_cache.batch_size//2
+                assert data_cache.batch_size>0
+                print("Memory error, reducing batch to", data_cache.batch_size)
 
         df_dict["tok_acc"] = np.concatenate(df_dict["tok_acc"], axis=0)
         print("Making pandas dataframe")
