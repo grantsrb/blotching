@@ -1,23 +1,8 @@
-# Semantic Blotching
+# Chain of Shortcuts
 
-## Using this repo
-After cloning, you will first need to initialize the `ml_utils`
-submodule. You can do this with the following commands at the terminal:
+See a writeup of this project [here.](https://github.com/grantsrb/blotching/blob/master/Grant-2023-ChainOfShortcuts.pdf)
 
-    $ git clone https://github.com/grantsrb/semantic_blotching.git
-    $ cd semantic_blotching
-    $ cd ml_utils
-    $ git submodule init
-    $ git submodule update
-    $ cd ../
-
-Next, you will need to make sure you have all necessary pacakges
-installed.
-
-Lastly, you can run a training by creating a hyperparameters.json and
-then running the following command:
-
-    # python main.py hyperparameters.json
+Another paper called [GPT Can Solve Mathematical Problems Without a Calculator](https://arxiv.org/abs/2309.03241) came out in September that largely does what we were moving towards. Overall, our direction doesn't seem that promising as a longterm focus, thus this project is largely dead 😢
 
 ## Hyperparameters
 
