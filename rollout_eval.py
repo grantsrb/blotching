@@ -24,8 +24,8 @@ n_samples = 10000 # the number of samples. if None, does all
 use_val_file = True # Highest priority
 use_train_file = False # overwritten by use_val_file
 temperature = 0.1
-n_rollouts = 25
-max_blotch_p = 0.4
+n_rollouts = 10
+max_blotch_p = 0.5
 
 # Env parameters
 # Use None to default to the training distribution
@@ -275,114 +275,123 @@ if __name__=="__main__":
         print("Using BPs:", bps)
 
         n_rolls = max(1, n_rollouts//len(bps))
-        for i,data in enumerate(data_cache):
-            start_time = time.time()
-            if "meta_data" in data:
-                meta_data = data["meta_data"]
-            if not hyps["model_parallel"]:
-                data["input_ids"] = data["input_ids"].to(rank)
-                data["output_ids"] = data["output_ids"].to(rank)
-            with torch.no_grad():
-                rollout_answers = []
-                for r in range(n_rolls):
-                    for blotch_p in bps:
-                        preds = torch.zeros(
-                            data["input_ids"].shape[0],
-                            len(str(math_env.get_max_val()))+3
-                        ).long().to(rank) + tokenizer.pad_idx
-                        print("\nBp:", blotch_p)
-                        package = wrapped_model(
-                            data,
-                            ret_preds=True,
-                            seq_len=hyps["seq_len"],
-                            tforce=False,
-                            prob_len=plen,
-                            no_grad=True,
-                            incl_all_inpts=True,
-                            blotch_p=blotch_p,
-                            temperature=temperature,
-                        )
-                        pred_ids = package["preds"]
-                        pmask = utils.get_soln_mask(
-                            pred_ids,
-                            eos_id=tokenizer.eos_idx,
-                            sep_id=tokenizer.sep_idx,
-                            pad_id=tokenizer.pad_idx,
-                            incl_eos=True,
-                            max_len=preds.shape[-1],
-                        )
-                        mask = utils.mask_up_to_idx(
-                            pmask.float().sum(-1), preds.shape[-1]
-                        )
+        mem_error = True
+        while mem_error:
+            mem_error = False
+            try:
+                for i,data in enumerate(data_cache):
+                    start_time = time.time()
+                    if "meta_data" in data:
+                        meta_data = data["meta_data"]
+                    if not hyps["model_parallel"]:
+                        data["input_ids"] = data["input_ids"].to(rank)
+                        data["output_ids"] = data["output_ids"].to(rank)
+                    with torch.no_grad():
+                        rollout_answers = []
+                        for r in range(n_rolls):
+                            for blotch_p in bps:
+                                preds = torch.zeros(
+                                    data["input_ids"].shape[0],
+                                    len(str(math_env.get_max_val()))+3
+                                ).long().to(rank) + tokenizer.pad_idx
+                                print("\nBp:", blotch_p)
+                                package = wrapped_model(
+                                    data,
+                                    ret_preds=True,
+                                    seq_len=hyps["seq_len"],
+                                    tforce=False,
+                                    prob_len=plen,
+                                    no_grad=True,
+                                    incl_all_inpts=True,
+                                    blotch_p=blotch_p,
+                                    temperature=temperature,
+                                )
+                                pred_ids = package["preds"]
+                                pmask = utils.get_soln_mask(
+                                    pred_ids,
+                                    eos_id=tokenizer.eos_idx,
+                                    sep_id=tokenizer.sep_idx,
+                                    pad_id=tokenizer.pad_idx,
+                                    incl_eos=True,
+                                    max_len=preds.shape[-1],
+                                )
+                                mask = utils.mask_up_to_idx(
+                                    pmask.float().sum(-1), preds.shape[-1]
+                                )
+                                if testing:
+                                    print("pmask:", pmask.float().sum(-1))
+                                    print("mask:", mask.float().sum(-1))
+                                    print("unequal:", tokenizer.decode(
+                                            pred_ids[pmask.float().sum(-1)==\
+                                            mask.float().sum(-1)][0]
+                                    ))
+                                    out_mask = data["output_ids"]==tokenizer.pad_idx
+                                    in_mask = data["input_ids"]==tokenizer.pad_idx
+                                    for ii in range(4):
+                                        print(tokenizer.decode(pred_ids[ii,1:][~in_mask[ii]]))
+                                        print(tokenizer.decode(
+                                            data["output_ids"][ii][~out_mask[ii]]
+                                        ))
+                                        print("ans:", tokenizer.decode(
+                                            pred_ids[ii][pmask[ii]]
+                                        ))
+                                        print()
+                                preds[mask.bool()] = pred_ids[pmask.bool()]
+                                rollout_answers.append(preds)
+
+                        preds = torch.stack(rollout_answers, dim=0)
+                        one_hots = utils.get_one_hot( preds, model.n_tokens )
+                        pred_ids = torch.argmax(one_hots.float().mean(0), dim=-1)
+
                         if testing:
-                            print("pmask:", pmask.float().sum(-1))
-                            print("mask:", mask.float().sum(-1))
-                            print("unequal:", tokenizer.decode(
-                                    pred_ids[pmask.float().sum(-1)==\
-                                    mask.float().sum(-1)][0]
-                            ))
-                            out_mask = data["output_ids"]==tokenizer.pad_idx
-                            in_mask = data["input_ids"]==tokenizer.pad_idx
-                            for ii in range(4):
-                                print(tokenizer.decode(pred_ids[ii,1:][~in_mask[ii]]))
-                                print(tokenizer.decode(
-                                    data["output_ids"][ii][~out_mask[ii]]
-                                ))
-                                print("ans:", tokenizer.decode(
-                                    pred_ids[ii][pmask[ii]]
-                                ))
-                                print()
-                        preds[mask.bool()] = pred_ids[pmask.bool()]
-                        rollout_answers.append(preds)
+                            print("preds:", preds.shape)
+                            print("one_hots:", one_hots.shape)
+                            print("one_hots:", one_hots[0,:4])
+                            print("preds:", preds[0,:4])
+                            print("argmax one_hots:", torch.argmax(one_hots,dim=-1)[0,:4])
+                            print("oh mean:", one_hots.float().mean(0)[0, :4])
+                            print("mean pred_ids:", pred_ids[:4])
 
-                preds = torch.stack(rollout_answers, dim=0)
-                one_hots = utils.get_one_hot( preds, model.n_tokens )
-                pred_ids = torch.argmax(one_hots.float().mean(0), dim=-1)
+                        preds = tokenizer.decode(pred_ids)
+                        probs =   meta_data["probs"]
+                        solns =   meta_data["solns"]
+                        labels =  meta_data["labels"]
+                        for prob,soln,label,pred in zip(probs,solns,labels,preds):
+                            df_dict["targ"].append(
+                             soln.split(tokenizer.eos)[0].split(tokenizer.sep)[-1]
+                            )
+                            df_dict["soln_str"].append(soln[1:]) # removes =
+                            df_dict["prob_str"].append(prob)
+                            df_dict["label_str"].append(label)
+                            df_dict["pred_str"].append(pred)
+                            ans = pred.split(tokenizer.eos)
+                            df_dict["ans"].append(ans[0])
 
-                if testing:
-                    print("preds:", preds.shape)
-                    print("one_hots:", one_hots.shape)
-                    print("one_hots:", one_hots[0,:4])
-                    print("preds:", preds[0,:4])
-                    print("argmax one_hots:", torch.argmax(one_hots,dim=-1)[0,:4])
-                    print("oh mean:", one_hots.float().mean(0)[0, :4])
-                    print("mean pred_ids:", pred_ids[:4])
+                        comps = [
+                          df_dict["ans"][-j]==df_dict["targ"][-j] for j in\
+                                reversed(range(1, len(preds)+1))
+                        ]
 
-                preds = tokenizer.decode(pred_ids)
-                probs =   meta_data["probs"]
-                solns =   meta_data["solns"]
-                labels =  meta_data["labels"]
-                for prob,soln,label,pred in zip(probs,solns,labels,preds):
-                    df_dict["targ"].append(
-                     soln.split(tokenizer.eos)[0].split(tokenizer.sep)[-1]
-                    )
-                    df_dict["soln_str"].append(soln[1:]) # removes =
-                    df_dict["prob_str"].append(prob)
-                    df_dict["label_str"].append(label)
-                    df_dict["pred_str"].append(pred)
-                    ans = pred.split(tokenizer.eos)
-                    df_dict["ans"].append(ans[0])
+                        correct = np.mean(comps)
+                        print(
+                            "Correct: {} - {}% - {}s".format(
+                                correct,
+                                int((i+1)/n_loops*100),
+                                round(time.time()-start_time, 2)
+                            ),
+                            end="                  \r"
+                        )
 
-                comps = [
-                  df_dict["ans"][-j]==df_dict["targ"][-j] for j in\
-                        reversed(range(1, len(preds)+1))
-                ]
-
-                correct = np.mean(comps)
-                print(
-                    "Correct: {} - {}% - {}s".format(
-                        correct,
-                        int((i+1)/n_loops*100),
-                        round(time.time()-start_time, 2)
-                    ),
-                    end="                  \r"
-                )
-
-            ##
-            if testing and i>=1:
-                print("DEBUG BREAK")
-                break
-            ##
+                    ##
+                    if testing and i>=1:
+                        print("DEBUG BREAK")
+                        break
+                    ##
+            except torch.cuda.OutOfMemoryError:
+                mem_error = True
+                data_cache.batch_size = data_cache.batch_size//2
+                assert data_cache.batch_size>0
+                print("Memory error, reducing batch to", data_cache.batch_size)
 
         print("Making pandas dataframe")
         for k in df_dict:
@@ -399,9 +408,11 @@ if __name__=="__main__":
         print()
         print("Avg Correct:", (df["ans"]==df["targ"]).mean())
         print("Saving...")
-        if os.path.exists(csv_path) and not overwrite:
+        if os.path.exists(csv_path):
             og_df = pd.read_csv(csv_path)
-            df = og_df.append(df, sort=True)
+            if overwrite: # remove all values at this temperature
+                og_df = og_df.loc[og_df["val_temp"]!=temperature]
+            df = pd.concat([og_df, df], sort=True)
         if not testing:
             df.to_csv(csv_path, mode="w", index=False, header=True)
             print("Saved to", csv_path)

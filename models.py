@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.optim.lr_scheduler import _LRScheduler
 import numpy as np
 import utils
-from utils import get_blotch_mask, get_pos_ids, get_tok_mask
+from utils import get_blotch_mask, get_pos_ids, get_tok_mask, arglast
 import ml_utils
 import math
 
@@ -653,9 +653,11 @@ class HFModel(Model):
             "intermediate_size": d_hid,
             "num_hidden_layers": self.n_layers,
             "num_attention_heads": self.n_heads,
+            "num_key_value_heads": self.n_heads,
             "hidden_act": self.actv_fxn,
             "n_positions": self.max_posencs,
             "rotary_dim": self.d_model//self.n_heads,
+            "rope_theta": self.d_model//self.n_heads,
             "n_ctx": self.max_posencs,
             "n_embd": self.d_model,
             "n_head": self.n_heads,
@@ -1344,16 +1346,14 @@ class LossWrapper(torch.nn.Module):
         ret_dict["acc"] = acc
 
         out_ids = data["output_ids"]
-        out_ends = torch.argmax( (out_ids==eos_idx).long(), dim=-1 )
-        # Case where soln len exceeds seq_len. Ideally this doesn't
-        # happen
-        out_ends[out_ends==0] = out_ends.shape[-1]-1 
+        sep_id = self.tokenizer.sep_idx
+        out_lasts = arglast( (out_ids==sep_id).long(), dim=-1 )
+
         pred_ids = preds[:,int(incl_all_inpts):].argmax(-1)
-        pred_ids[:,-1] = eos_idx
-        pred_ends = torch.argmax( (pred_ids==eos_idx).long(), dim=-1 )
-        diffs = (out_ends-pred_ends).float()
+        pred_lasts = arglast((pred_ids==sep_id).long(), dim=-1)
+        diffs = (out_lasts-pred_lasts).float()
         ret_dict["len_diff"] = diffs.mean()
-        ret_dict["len_percent"] = (diffs/out_ends).mean()*100
+        ret_dict["len_percent"] = (diffs/out_lasts).mean()*100
 
         if ret_preds:
             ret_dict["preds"] = preds.argmax(-1)
@@ -1418,7 +1418,6 @@ class DecayScheduler(_LRScheduler):
     """
     @staticmethod
     def calc_lr(step,
-            d_model,
             warmup_steps,
             max_lr=0.005,
             min_lr=1e-7,
@@ -1426,8 +1425,6 @@ class DecayScheduler(_LRScheduler):
         ):
         """
         Args:
-            d_model: int
-                the size of the latent vectors of the model
             warmup_steps: int
             min_lr: float
                 sets a lower bound on the learning rate. the lr will
@@ -1439,15 +1436,13 @@ class DecayScheduler(_LRScheduler):
                 an exponent dictating the rate of decay of the learning
                 rate following the warmup.
         """
-        size_factor = d_model**(-0.5)
-        scale = max_lr/(size_factor*warmup_steps**(-decay_exp))
-        warmup = scale * step * warmup_steps**(-(1+decay_exp))
+        scale = max_lr * warmup_steps**(decay_exp)
+        warmup = scale * step / warmup_steps**(1+decay_exp)
         reg = np.maximum(scale*step**(-decay_exp), min_lr)
-        return size_factor * np.minimum(reg, warmup)
+        return np.minimum(reg, warmup)
 
     def __init__(self, 
                  optimizer,
-                 d_model: int,
                  warmup_steps: int=100,
                  last_epoch: int=-1,
                  verbose: bool=False,
@@ -1457,8 +1452,6 @@ class DecayScheduler(_LRScheduler):
                  *args, **kwargs) -> None:
         """
         Args:
-            d_model: int
-                the size of the latent vectors of the model
             warmup_steps: int
             min_lr: float
                 sets a lower bound on the learning rate. the lr will
@@ -1472,7 +1465,6 @@ class DecayScheduler(_LRScheduler):
         """
         self.max_lr = lr
         self.min_lr = min_lr
-        self.d_model = d_model
         self.warmup_steps = warmup_steps
         self.lr_decay_exp = lr_decay_exp
         self.num_param_groups = len(optimizer.param_groups)
@@ -1481,7 +1473,6 @@ class DecayScheduler(_LRScheduler):
     def get_lr(self) -> float:
         lr = DecayScheduler.calc_lr(
             self._step_count,
-            d_model=self.d_model,
             warmup_steps=self.warmup_steps,
             max_lr=self.max_lr,
             min_lr=self.min_lr,

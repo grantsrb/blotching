@@ -13,7 +13,7 @@ $ python3 eval_model.py path/to/model_checkpt.pt
 
 verbose = True
 bsize = 1000 # Determines batch size of evaluation
-overwrite = False
+overwrite = False # will overwrite existing temperatures
 testing = False
 max_num = None # override the max_num given by the hyps.
 # Integer argument if you want to randomly sample n problems rather
@@ -106,6 +106,7 @@ if __name__=="__main__":
             except:
                 print("Unrecognized arg", arg)
     if overwrite: print("Overwriting!!!")
+    if temperature is None: temperature = 0
     print("Temperature:", temperature)
 
     if use_train_file:
@@ -240,7 +241,7 @@ if __name__=="__main__":
 
         mem_error = True
         while mem_error:
-            mem_error = False #pythondontfuxwitdowhileloops
+            mem_error = False #python doesn't like do while loops
             df_dict = {
                 "tok_acc":  [],
                 "ans": [],
@@ -344,9 +345,11 @@ if __name__=="__main__":
         print("Avg Token Acc:", (df["tok_acc"]).mean())
         print("Avg Correct:", (df["ans"]==df["targ"]).mean())
         print("Saving...")
-        if os.path.exists(csv_path) and not overwrite:
+        if os.path.exists(csv_path):
             og_df = pd.read_csv(csv_path)
-            df = og_df.append(df, sort=True)
+            if overwrite: # remove all values at this temperature
+                og_df = og_df.loc[og_df["val_temp"]!=temperature]
+            df = pd.concat([og_df, df], sort=True)
         if not testing:
             df.to_csv(csv_path, mode="w", index=False, header=True)
             print("Saved to", csv_path)
